@@ -42,11 +42,17 @@ class HawbManifest(Base):
     reference_number: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, server_default=FetchedValue())
     job_count: Mapped[int] = mapped_column(Integer, nullable=False)
     total_weight_kg: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     jobs: Mapped[list["HawbJob"]] = relationship("HawbJob", back_populates="manifest")
     creator: Mapped["User"] = relationship("User", lazy="selectin")  # type: ignore[name-defined]
+
+    @property
+    def created_by_name(self) -> str | None:
+        return self.creator.name if self.creator else None
 
 
 class HawbJob(Base):
@@ -83,6 +89,7 @@ class HawbJob(Base):
     extracted_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending_review")
     manifest_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_manifests.id", ondelete="SET NULL"))
+    manifest_sequence: Mapped[int | None] = mapped_column(Integer)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     manifested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

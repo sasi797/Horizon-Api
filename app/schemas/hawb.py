@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class HawbJobOut(BaseModel):
@@ -38,6 +38,7 @@ class HawbJobOut(BaseModel):
     extracted_data: dict
     status: str
     manifest_id: UUID | None
+    manifest_sequence: int | None
     locked: bool
     ready_at: datetime | None
     manifested_at: datetime | None
@@ -88,6 +89,13 @@ class HawbJobUpdate(BaseModel):
     direction: str | None = None
     special_handling: str | None = None
 
+    @field_validator("collection_at", "delivery_at")
+    @classmethod
+    def _assume_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
 
 class HawbJobPageOut(BaseModel):
     items: list[HawbJobOut]
@@ -104,7 +112,10 @@ class HawbManifestOut(BaseModel):
     reference_number: str
     job_count: int
     total_weight_kg: float
+    status: str
+    exported_at: datetime | None
     created_by: UUID
+    created_by_name: str | None
     created_at: datetime
 
 
@@ -113,4 +124,12 @@ class HawbManifestDetailOut(HawbManifestOut):
 
 
 class ManifestCreate(BaseModel):
+    job_ids: list[UUID]
+
+
+class ManifestJobsAdd(BaseModel):
+    job_ids: list[UUID]
+
+
+class ManifestReorder(BaseModel):
     job_ids: list[UUID]

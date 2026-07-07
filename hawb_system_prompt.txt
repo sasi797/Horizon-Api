@@ -37,7 +37,7 @@ Return a single JSON object — no surrounding text, no markdown fences, just th
       "dangerous_goods": false,
       "dangerous_goods_notes": "...",
       "special_handling": "...",
-      "packages": [ { "supplier": "...", "package_type": "...", "weight_kg": 0.0, "content_description": "..." } ],
+      "packages": [ { "supplier": "...", "package_type": "...", "weight_kg": 0.0, "content_description": "...", "temperature_range": "...", "dimensions": "..." } ],
       "extra": { ... }
     }
   ]
@@ -63,15 +63,15 @@ Return a single JSON object — no surrounding text, no markdown fences, just th
 - `package_qty` — integer total package quantity/count from the Totals block. null if not stated.
 - `weight_kg` — numeric total/chargeable weight in kg from the Totals block (fall back to actual weight if chargeable isn't given). null if not stated.
 - `volumetric_weight_kg` — numeric volumetric weight in kg from the Totals block. null if not stated.
-- `temperature_range` — the temperature range/requirement (e.g. "Uncontrolled", "-80", "2-8°C"). null if not stated.
-- `dimensions` — package dimensions in cm as printed (e.g. "33 x 30 x 31"). null if not stated.
+- `temperature_range` — the shipment-level temperature range/requirement (e.g. "Uncontrolled", "-80", "2-8°C"). If the Packages table gives a different range per row, combine them here joined by " / " in row order, e.g. "Uncontrolled / -80". null if not stated.
+- `dimensions` — shipment-level package dimensions in cm as printed (e.g. "33 x 30 x 31"). If the Packages table gives dimensions per row, combine them here joined by " / " in row order, e.g. "33 x 30 x 31 / 38 x 34 x 43". null if not stated.
 - `declared_value` — numeric declared value (just the number, not the currency). null if not stated.
 - `declared_value_currency` — the 3-letter currency code of the declared value (e.g. "GBP", "EUR", "USD"). null if not stated.
 - `direction` — "Inbound" or "Outbound" if printed below the handling block. null if not stated.
 - `dangerous_goods` — true if the document flags HAZ/ADR/dangerous goods for this shipment (e.g. a UN number is present instead of "No Dangerous Goods"), else false.
 - `dangerous_goods_notes` — UN number, class, packing group, or any hazardous-goods free text if `dangerous_goods` is true; else null.
 - `special_handling` — the Special Handling block's free text, captured verbatim (multi-line as printed) — do not paraphrase or parse it into sub-fields. null if not stated.
-- `packages` — array of package line objects from the Packages table, one per row: `supplier` (e.g. "Marken"), `package_type` (e.g. "BIOsystem I"), `weight_kg` (numeric), `content_description` (e.g. "Human CAT B"). Empty array if no package table is present.
+- `packages` — array of package line objects from the Packages table, one per row: `supplier` (e.g. "Marken"), `package_type` (e.g. "BIOsystem I"), `weight_kg` (numeric), `content_description` (e.g. "Human CAT B"), `temperature_range` (this row's Range column value, e.g. "Uncontrolled"; null if the table has no Range column), `dimensions` (this row's Dims column value, e.g. "33 x 30 x 31"; null if the table has no Dims column). Empty array if no package table is present.
 - `extra` — an object capturing any OTHER useful field you can read for this shipment that doesn't map to a field above (postcodes, appointment/tail-lift/timed-delivery notes not part of special handling, etc.) using your own descriptive keys. Nothing found for this shipment should be silently dropped — put it in `extra` if it doesn't map to a field above.
 
 ## SPLITTING RULES

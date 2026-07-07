@@ -135,7 +135,7 @@ def _parse_dt(value) -> datetime | None:
         return None
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(value, fmt)
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
