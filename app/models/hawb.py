@@ -44,11 +44,13 @@ class HawbManifest(Base):
     total_weight_kg: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    start_point: Mapped[str | None] = mapped_column(Text)
+    end_point: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     jobs: Mapped[list["HawbJob"]] = relationship("HawbJob", back_populates="manifest")
-    creator: Mapped["User"] = relationship("User", lazy="selectin")  # type: ignore[name-defined]
+    creator: Mapped["User | None"] = relationship("User", lazy="selectin")  # type: ignore[name-defined]
 
     @property
     def created_by_name(self) -> str | None:
@@ -85,6 +87,7 @@ class HawbJob(Base):
     declared_value_currency: Mapped[str | None] = mapped_column(String(10))
     direction: Mapped[str | None] = mapped_column(String(20))
     special_handling: Mapped[str | None] = mapped_column(Text)
+    job_service_type: Mapped[str | None] = mapped_column(String(30))
     packages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     extracted_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending_review")

@@ -89,7 +89,7 @@ CREATE SEQUENCE IF NOT EXISTS hawb_manifest_ref_seq START 1;
 CREATE TABLE IF NOT EXISTS hawb_manifests (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     reference_number VARCHAR(20) NOT NULL UNIQUE
-                        DEFAULT ('MNF-' || lpad(nextval('hawb_manifest_ref_seq')::text, 4, '0')),
+                        DEFAULT ('HZE-' || lpad(nextval('hawb_manifest_ref_seq')::text, 4, '0')),
     job_count       INTEGER      NOT NULL,
     total_weight_kg NUMERIC(10,2) NOT NULL,
     created_by      UUID         NOT NULL REFERENCES users(id),

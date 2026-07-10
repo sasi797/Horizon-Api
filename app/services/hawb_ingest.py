@@ -45,9 +45,14 @@ async def process_email_attachments(
 
 
 async def ingest_pdf(file_bytes: bytes, filename: str, *, source_message_id: str | None, sender_email: str | None, subject: str | None):
-    """Upload a HAWB PDF, extract jobs from it, and persist a HawbDocument + HawbJob rows."""
+    """Upload a HAWB PDF, extract jobs from it, and persist a HawbDocument + HawbJob rows.
+
+    Every HAWB pulled from the PDF becomes one manifest — the client's workflow
+    is "one PDF in, one manifest out", with the individual HAWBs as its child
+    rows. There is no manual manifest-building step anymore.
+    """
     from app.database import AsyncSessionLocal
-    from app.models.hawb import HawbDocument, HawbJob
+    from app.models.hawb import HawbDocument, HawbJob, HawbManifest
 
     key = f"{settings.s3_prefix}/hawb/{source_message_id or 'manual'}/{filename}"
     await upload_bytes(file_bytes, key, content_type="application/pdf")
@@ -80,6 +85,7 @@ async def ingest_pdf(file_bytes: bytes, filename: str, *, source_message_id: str
 
         inserted = 0
         skip_notes: list[str] = []
+        inserted_jobs: list[HawbJob] = []
         for job in jobs_data:
             hawb_number = (job.get("hawb_number") or "").strip()
             if not hawb_number:
@@ -88,8 +94,12 @@ async def ingest_pdf(file_bytes: bytes, filename: str, *, source_message_id: str
             if existing:
                 skip_notes.append(f"Duplicate HAWB skipped: {hawb_number}")
                 continue
-            db.add(HawbJob(
+            new_job = HawbJob(
                 document_id=document.id,
+                # This PDF layout's extraction is trusted enough to skip manual review.
+                # A second PDF layout is planned that will need pending_review instead.
+                status="ready_to_manifest",
+                ready_at=datetime.now(timezone.utc),
                 hawb_number=hawb_number,
                 page_start=job.get("page_start"),
                 shipper=job.get("shipper"),
@@ -117,13 +127,28 @@ async def ingest_pdf(file_bytes: bytes, filename: str, *, source_message_id: str
                 special_handling=job.get("special_handling"),
                 packages=job.get("packages") or [],
                 extracted_data=job,
-            ))
+            )
+            db.add(new_job)
+            inserted_jobs.append(new_job)
             inserted += 1
 
         document.job_count = inserted
         if skip_notes:
             note = "; ".join(skip_notes)
             document.error_message = note if not document.error_message else f"{document.error_message}; {note}"
+
+        if inserted_jobs:
+            await db.flush()
+            manifest = HawbManifest(
+                job_count=len(inserted_jobs),
+                total_weight_kg=sum((j.weight_kg or 0) for j in inserted_jobs),
+                created_by=None,
+            )
+            db.add(manifest)
+            await db.flush()
+            for sequence, hawb_job in enumerate(inserted_jobs, start=1):
+                hawb_job.manifest_id = manifest.id
+                hawb_job.manifest_sequence = sequence
 
         await db.commit()
         await db.refresh(document)

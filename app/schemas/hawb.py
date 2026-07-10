@@ -34,6 +34,7 @@ class HawbJobOut(BaseModel):
     declared_value_currency: str | None
     direction: str | None
     special_handling: str | None
+    job_service_type: str | None
     packages: list[dict]
     extracted_data: dict
     status: str
@@ -88,6 +89,7 @@ class HawbJobUpdate(BaseModel):
     declared_value_currency: str | None = None
     direction: str | None = None
     special_handling: str | None = None
+    job_service_type: str | None = None
 
     @field_validator("collection_at", "delivery_at")
     @classmethod
@@ -114,21 +116,22 @@ class HawbManifestOut(BaseModel):
     total_weight_kg: float
     status: str
     exported_at: datetime | None
-    created_by: UUID
+    start_point: str | None
+    end_point: str | None
+    created_by: UUID | None
     created_by_name: str | None
     created_at: datetime
 
 
 class HawbManifestDetailOut(HawbManifestOut):
     jobs: list[HawbJobOut]
+    document: HawbDocumentOut
+    pdf_url: str
 
 
-class ManifestCreate(BaseModel):
-    job_ids: list[UUID]
-
-
-class ManifestJobsAdd(BaseModel):
-    job_ids: list[UUID]
+class ManifestUpdate(BaseModel):
+    start_point: str | None = None
+    end_point: str | None = None
 
 
 class ManifestReorder(BaseModel):
