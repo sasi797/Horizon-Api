@@ -30,9 +30,13 @@ class HawbDocument(Base):
     job_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="processed")
     error_message: Mapped[str | None] = mapped_column(Text)
+    source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
+    email_body_text: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    jobs: Mapped[list["HawbJob"]] = relationship("HawbJob", back_populates="document", cascade="all, delete-orphan")
+    jobs: Mapped[list["HawbJob"]] = relationship(
+        "HawbJob", back_populates="document", cascade="all, delete-orphan", foreign_keys="HawbJob.document_id"
+    )
 
 
 class HawbManifest(Base):
@@ -43,6 +47,7 @@ class HawbManifest(Base):
     job_count: Mapped[int] = mapped_column(Integer, nullable=False)
     total_weight_kg: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     start_point: Mapped[str | None] = mapped_column(Text)
     end_point: Mapped[str | None] = mapped_column(Text)
@@ -62,6 +67,7 @@ class HawbJob(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_documents.id", ondelete="CASCADE"), nullable=False)
+    blind_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_documents.id"))
     hawb_number: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
     page_start: Mapped[int | None] = mapped_column(Integer)
     shipper: Mapped[str | None] = mapped_column(String(255))
@@ -90,6 +96,7 @@ class HawbJob(Base):
     job_service_type: Mapped[str | None] = mapped_column(String(30))
     packages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     extracted_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending_review")
     manifest_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_manifests.id", ondelete="SET NULL"))
     manifest_sequence: Mapped[int | None] = mapped_column(Integer)
@@ -99,5 +106,10 @@ class HawbJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    document: Mapped["HawbDocument"] = relationship("HawbDocument", back_populates="jobs", lazy="selectin")
+    document: Mapped["HawbDocument"] = relationship(
+        "HawbDocument", back_populates="jobs", foreign_keys=[document_id], lazy="selectin"
+    )
+    blind_document: Mapped["HawbDocument | None"] = relationship(
+        "HawbDocument", foreign_keys=[blind_document_id], lazy="selectin"
+    )
     manifest: Mapped["HawbManifest | None"] = relationship("HawbManifest", back_populates="jobs")

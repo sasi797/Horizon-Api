@@ -37,6 +37,9 @@ class HawbJobOut(BaseModel):
     job_service_type: str | None
     packages: list[dict]
     extracted_data: dict
+    source_kind: str
+    blind_document_id: UUID | None
+    blind_pdf_url: str | None = None
     status: str
     manifest_id: UUID | None
     manifest_sequence: int | None
@@ -58,6 +61,8 @@ class HawbDocumentOut(BaseModel):
     job_count: int
     status: str
     error_message: str | None
+    source_kind: str
+    email_body_text: str | None
 
 
 class HawbJobDetailOut(HawbJobOut):
@@ -120,6 +125,7 @@ class HawbManifestOut(BaseModel):
     end_point: str | None
     created_by: UUID | None
     created_by_name: str | None
+    source_kind: str
     created_at: datetime
 
 

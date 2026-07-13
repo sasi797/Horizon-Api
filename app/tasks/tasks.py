@@ -1,4 +1,5 @@
 import asyncio
+import html as html_lib
 import re
 import uuid
 from datetime import date, datetime, timezone
@@ -298,6 +299,15 @@ def _apply_inline_images(html: str, inline_map: dict[str, str]) -> str:
     return html
 
 
+def _plain_text_from_html(html: str) -> str:
+    """Rough HTML-to-text fallback for feeding an email body to the HAWB extractor
+    when Graph returns an HTML-only body (no text/plain part)."""
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<(br|/p|/div|/tr)\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html_lib.unescape(text).strip()
+
+
 def _graph_mark_read(client: httpx.Client, token: str, mailbox: str, msg_id: str):
     url = f"{GRAPH_BASE}/users/{mailbox}/messages/{msg_id}"
     client.patch(url, headers=_graph_headers(token), json={"isRead": True})
@@ -488,11 +498,13 @@ async def _poll_inbox_async():
             if pdf_attachments and raw_message_id:
                 try:
                     from app.services import hawb_ingest
+                    hawb_body_text = body_text or (_plain_text_from_html(body_html) if body_html else None)
                     await hawb_ingest.process_email_attachments(
                         message_id=raw_message_id,
                         sender_email=sender_email,
                         subject=subject,
                         pdf_attachments=pdf_attachments,
+                        body_text=hawb_body_text,
                     )
                 except Exception as e:
                     print(f"[BTS] HAWB ingest error for {raw_message_id[:40]}…: {e}")

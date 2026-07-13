@@ -24,6 +24,7 @@ router = APIRouter(prefix="/hawb", tags=["hawb"])
 @router.get("/jobs", response_model=HawbJobPageOut)
 async def list_jobs(
     status: str | None = Query(None),
+    source_kind: str | None = Query(None),
     search: str | None = Query(None),
     document_id: UUID | None = Query(None),
     page: int = Query(1, ge=1),
@@ -35,6 +36,8 @@ async def list_jobs(
 
     if status:
         q = q.where(HawbJob.status == status)
+    if source_kind:
+        q = q.where(HawbJob.source_kind == source_kind)
     if document_id:
         q = q.where(HawbJob.document_id == document_id)
     if search:
@@ -72,6 +75,8 @@ async def get_job(
 
     url = await presigned_url(job.document.storage_key)
     job_out = HawbJobOut.model_validate(job)
+    if job.blind_document_id:
+        job_out.blind_pdf_url = await presigned_url(job.blind_document.storage_key)
     return HawbJobDetailOut(
         **job_out.model_dump(),
         document=HawbDocumentOut.model_validate(job.document),
@@ -102,10 +107,14 @@ async def update_job(
 
 @router.get("/manifests", response_model=list[HawbManifestOut])
 async def list_manifests(
+    source_kind: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(HawbManifest).order_by(HawbManifest.created_at.desc()))
+    q = select(HawbManifest).order_by(HawbManifest.created_at.desc())
+    if source_kind:
+        q = q.where(HawbManifest.source_kind == source_kind)
+    result = await db.execute(q)
     return [HawbManifestOut.model_validate(m) for m in result.scalars().all()]
 
 
@@ -131,10 +140,17 @@ async def get_manifest(
     document = jobs[0].document
     url = await presigned_url(document.storage_key)
 
+    jobs_out = []
+    for j in jobs:
+        j_out = HawbJobOut.model_validate(j)
+        if j.blind_document_id:
+            j_out.blind_pdf_url = await presigned_url(j.blind_document.storage_key)
+        jobs_out.append(j_out)
+
     manifest_out = HawbManifestOut.model_validate(manifest)
     return HawbManifestDetailOut(
         **manifest_out.model_dump(),
-        jobs=[HawbJobOut.model_validate(j) for j in jobs],
+        jobs=jobs_out,
         document=HawbDocumentOut.model_validate(document),
         pdf_url=url,
     )
