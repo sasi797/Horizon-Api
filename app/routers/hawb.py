@@ -84,6 +84,28 @@ async def get_job(
     )
 
 
+@router.post("/jobs/{job_id}/approve", response_model=HawbJobOut)
+async def approve_job(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = await db.get(HawbJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.locked:
+        raise HTTPException(status_code=409, detail="Manifest has been exported and is locked")
+    if job.status != "pending_review":
+        raise HTTPException(status_code=409, detail=f"Job is '{job.status}', not pending review")
+
+    job.status = "ready_to_manifest"
+    job.ready_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(job)
+    return HawbJobOut.model_validate(job)
+
+
 @router.patch("/jobs/{job_id}", response_model=HawbJobOut)
 async def update_job(
     job_id: UUID,
@@ -107,11 +129,24 @@ async def update_job(
 
 @router.get("/manifests", response_model=list[HawbManifestOut])
 async def list_manifests(
+    needs_review: bool = Query(False),
     source_kind: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # A manifest with any still-unreviewed job is held out of the main list
+    # (it isn't a real, actionable manifest yet) and only surfaces in the
+    # needs_review queue until every job in it has been approved.
+    pending_manifest_ids = (
+        select(HawbJob.manifest_id)
+        .where(HawbJob.manifest_id.isnot(None), HawbJob.status == "pending_review")
+        .distinct()
+    )
     q = select(HawbManifest).order_by(HawbManifest.created_at.desc())
+    if needs_review:
+        q = q.where(HawbManifest.id.in_(pending_manifest_ids))
+    else:
+        q = q.where(HawbManifest.id.notin_(pending_manifest_ids))
     if source_kind:
         q = q.where(HawbManifest.source_kind == source_kind)
     result = await db.execute(q)
@@ -166,8 +201,8 @@ async def update_manifest(
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    if manifest.status == "exported":
-        raise HTTPException(status_code=409, detail="Manifest has been exported and is locked")
+    if manifest.status != "open":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}' and locked")
 
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(manifest, field, value)
@@ -187,8 +222,8 @@ async def reorder_manifest_jobs(
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    if manifest.status == "exported":
-        raise HTTPException(status_code=409, detail="Manifest is exported and locked")
+    if manifest.status != "open":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}' and locked")
 
     result = await db.execute(select(HawbJob).where(HawbJob.manifest_id == manifest_id))
     jobs_by_id = {j.id: j for j in result.scalars().all()}
@@ -216,13 +251,20 @@ async def export_manifest(
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    if manifest.status == "exported":
-        raise HTTPException(status_code=409, detail="Manifest is already exported")
+    if manifest.status != "open":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not open")
 
     jobs_result = await db.execute(
         select(HawbJob).where(HawbJob.manifest_id == manifest_id).order_by(HawbJob.manifest_sequence)
     )
     jobs = jobs_result.scalars().all()
+
+    pending = [j.hawb_number for j in jobs if j.status == "pending_review"]
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Manifest has jobs still pending review: {', '.join(pending)}",
+        )
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -249,8 +291,7 @@ async def export_manifest(
         job.status = "manifested"
         job.manifested_at = now
 
-    manifest.status = "exported"
-    manifest.exported_at = now
+    manifest.status = "booked"
     await db.commit()
 
     buffer.seek(0)
@@ -259,3 +300,58 @@ async def export_manifest(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{manifest.reference_number}.csv"'},
     )
+
+
+@router.post("/manifests/{manifest_id}/confirm", response_model=HawbManifestOut)
+async def confirm_manifest(
+    manifest_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status not in ("booked", "on_hold"):
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not booked or on hold")
+
+    manifest.status = "confirmed"
+    await db.commit()
+    manifest = await db.get(HawbManifest, manifest.id, populate_existing=True)
+    return HawbManifestOut.model_validate(manifest)
+
+
+@router.post("/manifests/{manifest_id}/hold", response_model=HawbManifestOut)
+async def hold_manifest(
+    manifest_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status not in ("booked", "confirmed"):
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not booked or confirmed")
+
+    manifest.status = "on_hold"
+    await db.commit()
+    manifest = await db.get(HawbManifest, manifest.id, populate_existing=True)
+    return HawbManifestOut.model_validate(manifest)
+
+
+@router.post("/manifests/{manifest_id}/mark-exported", response_model=HawbManifestOut)
+async def mark_exported_manifest(
+    manifest_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status != "confirmed":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not confirmed")
+
+    manifest.status = "exported"
+    manifest.exported_at = datetime.now(timezone.utc)
+    await db.commit()
+    manifest = await db.get(HawbManifest, manifest.id, populate_existing=True)
+    return HawbManifestOut.model_validate(manifest)

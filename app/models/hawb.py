@@ -46,7 +46,7 @@ class HawbManifest(Base):
     reference_number: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, server_default=FetchedValue())
     job_count: Mapped[int] = mapped_column(Integer, nullable=False)
     total_weight_kg: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     start_point: Mapped[str | None] = mapped_column(Text)
