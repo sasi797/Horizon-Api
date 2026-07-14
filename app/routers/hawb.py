@@ -85,21 +85,6 @@ async def get_job(
     )
 
 
-async def _sync_manifest_review_status(db: AsyncSession, manifest_id: UUID | None) -> None:
-    """Keep a manifest's status in step with whether any of its jobs are
-    still pending review — only while it hasn't left the pre-booking phase
-    (booked/confirmed/on_hold/exported manifests are never touched here)."""
-    if not manifest_id:
-        return
-    manifest = await db.get(HawbManifest, manifest_id)
-    if not manifest or manifest.status not in ("pending_review", "open"):
-        return
-    has_pending = await db.scalar(
-        select(HawbJob.id).where(HawbJob.manifest_id == manifest_id, HawbJob.status == "pending_review").limit(1)
-    )
-    manifest.status = "pending_review" if has_pending else "open"
-
-
 @router.post("/jobs/{job_id}/approve", response_model=HawbJobOut)
 async def approve_job(
     job_id: UUID,
@@ -116,7 +101,6 @@ async def approve_job(
 
     job.status = "ready_to_manifest"
     job.ready_at = datetime.now(timezone.utc)
-    await _sync_manifest_review_status(db, job.manifest_id)
 
     await db.commit()
     await db.refresh(job)
@@ -221,7 +205,6 @@ async def apply_job_update(
         )).scalars().all()
         manifest = await db.get(HawbManifest, job.manifest_id)
         manifest.total_weight_kg = sum((w or 0) for w in manifest_jobs)
-        await _sync_manifest_review_status(db, job.manifest_id)
 
     await db.commit()
     await db.refresh(job)

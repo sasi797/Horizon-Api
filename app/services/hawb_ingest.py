@@ -207,7 +207,6 @@ async def ingest_email_batch(
                     total_weight_kg=sum((j.weight_kg or 0) for j in doc_jobs),
                     created_by=None,
                     source_kind="blind" if any(j.source_kind == "blind" for j in doc_jobs) else "plain",
-                    status="pending_review" if any(j.status == "pending_review" for j in doc_jobs) else "open",
                 )
                 db.add(manifest)
                 await db.flush()
