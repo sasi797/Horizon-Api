@@ -113,3 +113,32 @@ class HawbJob(Base):
         "HawbDocument", foreign_keys=[blind_document_id], lazy="selectin"
     )
     manifest: Mapped["HawbManifest | None"] = relationship("HawbManifest", back_populates="jobs")
+    pending_updates: Mapped[list["HawbJobPendingUpdate"]] = relationship(
+        "HawbJobPendingUpdate", back_populates="job", cascade="all, delete-orphan", foreign_keys="HawbJobPendingUpdate.job_id"
+    )
+
+
+class HawbJobPendingUpdate(Base):
+    """A newer extraction arrived for a hawb_number that already has a job.
+
+    Never applied automatically — a reviewer compares proposed_data against
+    the job's current field values and explicitly applies or dismisses it.
+    reason='blind_companion_merge' means the "duplicate" isn't a duplicate at
+    all: it's the missing plain/MF-PCS companion for an existing job that was
+    persisted unmatched, arriving in a later email; proposed_data in that case
+    is already the full merged result (see hawb_extract.merge_blind_job),
+    and blind_document_id records which document supplied the missing half.
+    """
+    __tablename__ = "hawb_job_pending_updates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_jobs.id", ondelete="CASCADE"), nullable=False)
+    source_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_documents.id", ondelete="CASCADE"), nullable=False)
+    reason: Mapped[str] = mapped_column(String(30), nullable=False)
+    proposed_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    job: Mapped["HawbJob"] = relationship("HawbJob", back_populates="pending_updates", foreign_keys=[job_id], lazy="selectin")
+    source_document: Mapped["HawbDocument"] = relationship("HawbDocument", foreign_keys=[source_document_id], lazy="selectin")

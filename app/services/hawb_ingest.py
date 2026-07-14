@@ -65,7 +65,7 @@ async def ingest_email_batch(
     its plain document's manifest instead of getting one of its own.
     """
     from app.database import AsyncSessionLocal
-    from app.models.hawb import HawbDocument, HawbJob, HawbManifest
+    from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbManifest
 
     blind_atts = [a for a in pdf_attachments if _is_blind_filename(a.get("filename") or "")]
     plain_atts = [a for a in pdf_attachments if not _is_blind_filename(a.get("filename") or "")]
@@ -142,15 +142,46 @@ async def ingest_email_batch(
                     source_kind="plain", status="ready_to_manifest",
                 ))
 
-        # --- Dedup against existing hawb_numbers, insert, tally per-document job counts ---
+        # --- Dedup against existing hawb_numbers: insert new, or queue a pending update ---
+        # A hawb_number that already has a job is never silently dropped and never
+        # auto-applied (even to an already-exported job) — it's queued for manual
+        # review. If either side is blind-sourced, the "duplicate" usually isn't
+        # one at all: it's the missing plain/MF-PCS companion for an existing job
+        # that was persisted unmatched, now arriving in a later email — that case
+        # gets a real merge (same as the in-email merge path) instead of a plain
+        # field diff.
         inserted_by_document: dict[uuid.UUID, list[HawbJob]] = {}
         skip_notes_by_document: dict[uuid.UUID, list[str]] = {}
         for job_row in jobs_to_insert:
-            existing = await db.scalar(select(HawbJob.id).where(HawbJob.hawb_number == job_row.hawb_number))
+            existing = await db.scalar(select(HawbJob).where(HawbJob.hawb_number == job_row.hawb_number))
             if existing:
-                skip_notes_by_document.setdefault(job_row.document_id, []).append(
-                    f"Duplicate HAWB skipped: {job_row.hawb_number}"
-                )
+                is_merge_case = job_row.source_kind == "blind" or existing.source_kind == "blind"
+                if is_merge_case:
+                    if job_row.source_kind == "blind":
+                        blind_data, plain_data = job_row.extracted_data, existing.extracted_data
+                    else:
+                        blind_data, plain_data = existing.extracted_data, job_row.extracted_data
+                    try:
+                        proposed_data = await asyncio.get_event_loop().run_in_executor(
+                            None, hawb_extract.merge_blind_job, plain_data, blind_data, email_body
+                        )
+                    except Exception:
+                        logger.error("HAWB pending-update merge failed for %s", job_row.hawb_number, exc_info=True)
+                        proposed_data = job_row.extracted_data
+                    reason = "blind_companion_merge"
+                    note = f"Companion match found for existing HAWB, queued for review: {job_row.hawb_number}"
+                else:
+                    proposed_data = job_row.extracted_data
+                    reason = "duplicate_resend"
+                    note = f"Duplicate HAWB queued for review: {job_row.hawb_number}"
+
+                db.add(HawbJobPendingUpdate(
+                    job_id=existing.id,
+                    source_document_id=job_row.document_id,
+                    reason=reason,
+                    proposed_data=proposed_data,
+                ))
+                skip_notes_by_document.setdefault(job_row.document_id, []).append(note)
                 continue
             db.add(job_row)
             inserted_by_document.setdefault(job_row.document_id, []).append(job_row)
@@ -176,6 +207,7 @@ async def ingest_email_batch(
                     total_weight_kg=sum((j.weight_kg or 0) for j in doc_jobs),
                     created_by=None,
                     source_kind="blind" if any(j.source_kind == "blind" for j in doc_jobs) else "plain",
+                    status="pending_review" if any(j.status == "pending_review" for j in doc_jobs) else "open",
                 )
                 db.add(manifest)
                 await db.flush()

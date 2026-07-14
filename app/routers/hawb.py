@@ -10,12 +10,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
-from app.models.hawb import HawbJob, HawbManifest
+from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbManifest
 from app.models.user import User
 from app.schemas.hawb import (
-    HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobUpdate,
+    HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
     HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
 )
+from app.services.hawb_ingest import _parse_dt
 from app.storage import presigned_url
 
 router = APIRouter(prefix="/hawb", tags=["hawb"])
@@ -84,6 +85,21 @@ async def get_job(
     )
 
 
+async def _sync_manifest_review_status(db: AsyncSession, manifest_id: UUID | None) -> None:
+    """Keep a manifest's status in step with whether any of its jobs are
+    still pending review — only while it hasn't left the pre-booking phase
+    (booked/confirmed/on_hold/exported manifests are never touched here)."""
+    if not manifest_id:
+        return
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest or manifest.status not in ("pending_review", "open"):
+        return
+    has_pending = await db.scalar(
+        select(HawbJob.id).where(HawbJob.manifest_id == manifest_id, HawbJob.status == "pending_review").limit(1)
+    )
+    manifest.status = "pending_review" if has_pending else "open"
+
+
 @router.post("/jobs/{job_id}/approve", response_model=HawbJobOut)
 async def approve_job(
     job_id: UUID,
@@ -100,6 +116,7 @@ async def approve_job(
 
     job.status = "ready_to_manifest"
     job.ready_at = datetime.now(timezone.utc)
+    await _sync_manifest_review_status(db, job.manifest_id)
 
     await db.commit()
     await db.refresh(job)
@@ -127,26 +144,116 @@ async def update_job(
     return HawbJobOut.model_validate(job)
 
 
+_PENDING_UPDATE_FIELDS = [
+    "shipper", "consignee", "collection_at", "delivery_at", "package_qty", "weight_kg",
+    "dangerous_goods", "dangerous_goods_notes", "client_account", "package_sequence",
+    "shipper_contact", "shipper_phone", "shipper_reference", "consignee_contact",
+    "consignee_phone", "consignee_reference", "temperature_range", "dimensions",
+    "volumetric_weight_kg", "declared_value", "declared_value_currency", "direction",
+    "special_handling", "packages",
+]
+_PENDING_UPDATE_DATE_FIELDS = {"collection_at", "delivery_at"}
+
+
+@router.get("/job-updates", response_model=list[HawbJobPendingUpdateOut])
+async def list_job_updates(
+    status: str = Query("pending"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    q = (
+        select(HawbJobPendingUpdate)
+        .where(HawbJobPendingUpdate.status == status)
+        .order_by(HawbJobPendingUpdate.created_at.desc())
+    )
+    result = await db.execute(q)
+    return [HawbJobPendingUpdateOut.model_validate(u) for u in result.scalars().all()]
+
+
+@router.post("/job-updates/{update_id}/apply", response_model=HawbJobOut)
+async def apply_job_update(
+    update_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    update = await db.get(HawbJobPendingUpdate, update_id)
+    if not update:
+        raise HTTPException(status_code=404, detail="Pending update not found")
+    if update.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Update is already '{update.status}'")
+
+    job = await db.get(HawbJob, update.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    data = update.proposed_data
+    for field in _PENDING_UPDATE_FIELDS:
+        if field not in data:
+            continue
+        value = data[field]
+        if field in _PENDING_UPDATE_DATE_FIELDS:
+            value = _parse_dt(value)
+        setattr(job, field, value)
+    job.extracted_data = data
+
+    if update.reason == "blind_companion_merge":
+        source_doc = await db.get(HawbDocument, update.source_document_id)
+        job.source_kind = "blind"
+        if source_doc.source_kind == "blind":
+            job.blind_document_id = source_doc.id
+        else:
+            # The plain companion just arrived — repoint the primary document to
+            # it, and keep the job's old (previously MF-PCS-only) document as
+            # the blind companion reference.
+            job.blind_document_id = job.document_id
+            job.document_id = source_doc.id
+
+    if not job.locked:
+        job.status = "pending_review"
+        job.ready_at = None
+
+    update.status = "applied"
+    update.resolved_at = datetime.now(timezone.utc)
+
+    if job.manifest_id:
+        manifest_jobs = (await db.execute(
+            select(HawbJob.weight_kg).where(HawbJob.manifest_id == job.manifest_id)
+        )).scalars().all()
+        manifest = await db.get(HawbManifest, job.manifest_id)
+        manifest.total_weight_kg = sum((w or 0) for w in manifest_jobs)
+        await _sync_manifest_review_status(db, job.manifest_id)
+
+    await db.commit()
+    await db.refresh(job)
+    return HawbJobOut.model_validate(job)
+
+
+@router.post("/job-updates/{update_id}/dismiss", response_model=HawbJobPendingUpdateOut)
+async def dismiss_job_update(
+    update_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    update = await db.get(HawbJobPendingUpdate, update_id)
+    if not update:
+        raise HTTPException(status_code=404, detail="Pending update not found")
+    if update.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Update is already '{update.status}'")
+
+    update.status = "dismissed"
+    update.resolved_at = datetime.now(timezone.utc)
+    await db.commit()
+    update = await db.get(HawbJobPendingUpdate, update.id, populate_existing=True)
+    return HawbJobPendingUpdateOut.model_validate(update)
+
+
 @router.get("/manifests", response_model=list[HawbManifestOut])
 async def list_manifests(
-    needs_review: bool = Query(False),
     source_kind: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # A manifest with any still-unreviewed job is held out of the main list
-    # (it isn't a real, actionable manifest yet) and only surfaces in the
-    # needs_review queue until every job in it has been approved.
-    pending_manifest_ids = (
-        select(HawbJob.manifest_id)
-        .where(HawbJob.manifest_id.isnot(None), HawbJob.status == "pending_review")
-        .distinct()
-    )
     q = select(HawbManifest).order_by(HawbManifest.created_at.desc())
-    if needs_review:
-        q = q.where(HawbManifest.id.in_(pending_manifest_ids))
-    else:
-        q = q.where(HawbManifest.id.notin_(pending_manifest_ids))
     if source_kind:
         q = q.where(HawbManifest.source_kind == source_kind)
     result = await db.execute(q)
@@ -201,7 +308,7 @@ async def update_manifest(
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    if manifest.status != "open":
+    if manifest.status not in ("pending_review", "open"):
         raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}' and locked")
 
     for field, value in body.model_dump(exclude_unset=True).items():
@@ -222,7 +329,7 @@ async def reorder_manifest_jobs(
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    if manifest.status != "open":
+    if manifest.status not in ("pending_review", "open"):
         raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}' and locked")
 
     result = await db.execute(select(HawbJob).where(HawbJob.manifest_id == manifest_id))

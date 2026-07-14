@@ -135,6 +135,20 @@ class HawbManifestDetailOut(HawbManifestOut):
     pdf_url: str
 
 
+class HawbJobPendingUpdateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    job_id: UUID
+    reason: str
+    proposed_data: dict
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+    job: HawbJobOut
+    source_document: HawbDocumentOut
+
+
 class ManifestUpdate(BaseModel):
     start_point: str | None = None
     end_point: str | None = None
