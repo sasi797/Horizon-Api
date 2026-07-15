@@ -65,6 +65,10 @@ class HawbDocumentOut(BaseModel):
     email_body_text: str | None
 
 
+class HawbManifestDocumentOut(HawbDocumentOut):
+    pdf_url: str
+
+
 class HawbJobDetailOut(HawbJobOut):
     document: HawbDocumentOut
     pdf_url: str
@@ -131,8 +135,7 @@ class HawbManifestOut(BaseModel):
 
 class HawbManifestDetailOut(HawbManifestOut):
     jobs: list[HawbJobOut]
-    document: HawbDocumentOut
-    pdf_url: str
+    documents: list[HawbManifestDocumentOut]
 
 
 class HawbJobPendingUpdateOut(BaseModel):

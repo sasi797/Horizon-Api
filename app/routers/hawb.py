@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import math
@@ -14,7 +15,7 @@ from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbMan
 from app.models.user import User
 from app.schemas.hawb import (
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
-    HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
+    HawbManifestDetailOut, HawbManifestDocumentOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
 )
 from app.services.hawb_ingest import _parse_dt
 from app.storage import presigned_url
@@ -260,10 +261,18 @@ async def get_manifest(
     if not jobs:
         raise HTTPException(status_code=404, detail="Manifest has no jobs")
 
-    # Every job in a manifest comes from the same source PDF, so any one of
-    # them points at the document to show in the PDF pane.
-    document = jobs[0].document
-    url = await presigned_url(document.storage_key)
+    # A manifest can span jobs from multiple source PDFs (multiple attachments
+    # on the same email) — collect the unique documents referenced by this
+    # manifest's jobs, preserving first-seen (manifest_sequence) order, and
+    # generate one presigned URL per document.
+    unique_documents = list(dict.fromkeys(j.document for j in jobs))
+    document_urls = await asyncio.gather(
+        *(presigned_url(doc.storage_key) for doc in unique_documents)
+    )
+    documents_out = [
+        HawbManifestDocumentOut(**HawbDocumentOut.model_validate(doc).model_dump(), pdf_url=url)
+        for doc, url in zip(unique_documents, document_urls)
+    ]
 
     jobs_out = []
     for j in jobs:
@@ -276,8 +285,7 @@ async def get_manifest(
     return HawbManifestDetailOut(
         **manifest_out.model_dump(),
         jobs=jobs_out,
-        document=HawbDocumentOut.model_validate(document),
-        pdf_url=url,
+        documents=documents_out,
     )
 
 
