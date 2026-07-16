@@ -17,15 +17,6 @@ def _is_blind_filename(filename: str) -> bool:
     return "mf-pcs" in filename.lower()
 
 
-def _manifest_group_key(doc) -> str:
-    """Group PDFs into one manifest per email. `source_message_id` is shared
-    by every attachment from the same email (see `ingest_email_batch`); the
-    `doc.id` fallback only applies to a hypothetical no-email caller, so such
-    documents never get silently merged with anything else.
-    """
-    return f"msg:{doc.source_message_id}" if doc.source_message_id else f"doc:{doc.id}"
-
-
 async def process_email_attachments(
     *, message_id: str, sender_email: str, subject: str, pdf_attachments: list[dict], body_text: str | None = None
 ) -> None:
@@ -204,35 +195,22 @@ async def ingest_email_batch(
                 note = "; ".join(notes)
                 doc.error_message = note if not doc.error_message else f"{doc.error_message}; {note}"
 
-        # --- Manifest creation: one manifest per EMAIL (grouped by source_message_id),
-        # containing every newly-inserted job across every document (PDF attachment)
-        # that shares that email — not one manifest per document/PDF.
+        # --- Manifest creation: one per document that ended up with jobs attached to it ---
         if inserted_by_document:
             await db.flush()
-
-            ordered_group_keys: list[str] = []
-            jobs_by_group: dict[str, list[HawbJob]] = {}
             for doc in all_docs:
                 doc_jobs = inserted_by_document.get(doc.id)
                 if not doc_jobs:
                     continue
-                key = _manifest_group_key(doc)
-                if key not in jobs_by_group:
-                    jobs_by_group[key] = []
-                    ordered_group_keys.append(key)
-                jobs_by_group[key].extend(doc_jobs)
-
-            for key in ordered_group_keys:
-                group_jobs = jobs_by_group[key]
                 manifest = HawbManifest(
-                    job_count=len(group_jobs),
-                    total_weight_kg=sum((j.weight_kg or 0) for j in group_jobs),
+                    job_count=len(doc_jobs),
+                    total_weight_kg=sum((j.weight_kg or 0) for j in doc_jobs),
                     created_by=None,
-                    source_kind="blind" if any(j.source_kind == "blind" for j in group_jobs) else "plain",
+                    source_kind="blind" if any(j.source_kind == "blind" for j in doc_jobs) else "plain",
                 )
                 db.add(manifest)
                 await db.flush()
-                for sequence, hawb_job in enumerate(group_jobs, start=1):
+                for sequence, hawb_job in enumerate(doc_jobs, start=1):
                     hawb_job.manifest_id = manifest.id
                     hawb_job.manifest_sequence = sequence
 

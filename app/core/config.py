@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Database
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5432/bts_db"
+    DATABASE_URL: str
 
     # Redis / Celery
     REDIS_URL: str = "redis://localhost:6379/0"

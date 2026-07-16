@@ -538,23 +538,6 @@ async def _poll_inbox_async():
                             now_utc = datetime.now(_tz.utc)
                             booking_obj.updated_at = now_utc
                             booking_obj.last_email_at = now_utc
-                        # if booking_obj and booking_obj.status == "Completed":
-                        #     booking_obj.status = "In Progress"
-                        #     reopened = True
-                        #     from app.models.booking import BookingEvent
-                        #     db.add(BookingEvent(
-                        #         booking_id=existing_booking_id,
-                        #         event="status_changed",
-                        #         actor_name="System",
-                        #         old_value="Completed",
-                        #         new_value="In Progress",
-                        #     ))
-                        #     db.add(BookingEvent(
-                        #         booking_id=existing_booking_id,
-                        #         event="reply_received",
-                        #         actor_name="System",
-                        #         new_value=f"Reply from {sender_email}",
-                        #     ))
 
                         email_record = EmailMessage(
                             id=email_msg_id,

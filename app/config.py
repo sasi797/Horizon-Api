@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Database
-    database_url: str = "postgresql+asyncpg://bts_user:bts_pass@localhost:5432/bts_db"
+    database_url: str
 
     # Redis
     redis_url: str = "redis://:bts_redis_pass@localhost:6379/0"
