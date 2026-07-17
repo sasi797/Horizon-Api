@@ -15,7 +15,7 @@ from app.routers import (
     agents, allocations, attendance, auth, booking_config, bookings,
     dashboard, email_messages, email_templates, events, graph_webhook,
     hawb, history, notifications, pending_queue, reports, roles, shifts, account_codes,
-    upload,
+    upload, users,
 )
 
 
@@ -83,6 +83,7 @@ app.include_router(attendance.router)
 app.include_router(allocations.router)
 app.include_router(pending_queue.router)
 app.include_router(roles.router)
+app.include_router(users.router)
 app.include_router(email_templates.router)
 app.include_router(shifts.router)
 app.include_router(reports.router)

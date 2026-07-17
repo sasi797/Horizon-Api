@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import get_current_user, get_db
+from app.dependencies import get_db, require_admin
 from app.models.role import Role
 from app.models.user import User
 from app.schemas.role import RoleCreate, RoleOut, RoleUpdate
@@ -30,7 +30,7 @@ async def _role_with_count(db: AsyncSession, role_id: UUID) -> Role:
 @router.get("", response_model=list[RoleOut])
 async def list_roles(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_admin),
 ):
     rows = await db.execute(
         select(Role, func.count(User.id).label("user_count"))
@@ -49,7 +49,7 @@ async def list_roles(
 async def create_role(
     body: RoleCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_admin),
 ):
     existing = await db.execute(
         select(Role).where((Role.name == body.name) | (Role.key == body.key))
@@ -69,7 +69,7 @@ async def update_role(
     role_id: str,
     body: RoleUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_admin),
 ):
     role = await db.get(Role, UUID(role_id))
     if role is None:
@@ -85,7 +85,7 @@ async def update_role(
 async def delete_role(
     role_id: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_admin),
 ):
     role = await db.get(Role, UUID(role_id))
     if role is None:
