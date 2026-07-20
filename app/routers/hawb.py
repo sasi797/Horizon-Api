@@ -375,6 +375,21 @@ async def export_manifest(
         raise HTTPException(status_code=404, detail="Manifest not found")
     if manifest.status != "open":
         raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not open")
+    if manifest.exported_at is not None:
+        raise HTTPException(status_code=409, detail="Manifest has already been exported")
+
+    missing_fields = [
+        label for label, value in [
+            ("Job reference", manifest.job_reference),
+            ("Account number", manifest.account_number),
+            ("Vehicle size", manifest.vehicle_size),
+        ] if not value
+    ]
+    if missing_fields:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Missing required fields before export: {', '.join(missing_fields)}",
+        )
 
     jobs_result = await db.execute(
         select(HawbJob).where(HawbJob.manifest_id == manifest_id).order_by(HawbJob.manifest_sequence)
@@ -413,7 +428,9 @@ async def export_manifest(
         job.status = "manifested"
         job.manifested_at = now
 
-    manifest.status = "booked"
+    # Status intentionally stays 'open' — exported_at is what marks this manifest
+    # (and its now-locked jobs) as exported, not a status transition.
+    manifest.exported_at = now
     await db.commit()
 
     buffer.seek(0)
@@ -422,6 +439,59 @@ async def export_manifest(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{manifest.reference_number}.csv"'},
     )
+
+
+@router.post("/manifests/{manifest_id}/cancel", response_model=HawbManifestOut)
+async def cancel_manifest(
+    manifest_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status != "open":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not open")
+    if manifest.exported_at is not None:
+        raise HTTPException(status_code=409, detail="Manifest has already been exported and cannot be cancelled")
+
+    # Soft delete: jobs stay attached (not detached/released) and just get
+    # locked, so Reopen can restore this manifest exactly as it was — nothing
+    # to reconcile against jobs that might have been claimed elsewhere.
+    jobs_result = await db.execute(select(HawbJob).where(HawbJob.manifest_id == manifest_id))
+    for job in jobs_result.scalars().all():
+        job.locked = True
+
+    manifest.status = "cancelled"
+    manifest.cancelled_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    manifest = await db.get(HawbManifest, manifest.id, populate_existing=True)
+    return HawbManifestOut.model_validate(manifest)
+
+
+@router.post("/manifests/{manifest_id}/reopen", response_model=HawbManifestOut)
+async def reopen_manifest(
+    manifest_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status != "cancelled":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not cancelled")
+
+    jobs_result = await db.execute(select(HawbJob).where(HawbJob.manifest_id == manifest_id))
+    for job in jobs_result.scalars().all():
+        job.locked = False
+
+    manifest.status = "open"
+    manifest.cancelled_at = None
+
+    await db.commit()
+    manifest = await db.get(HawbManifest, manifest.id, populate_existing=True)
+    return HawbManifestOut.model_validate(manifest)
 
 
 @router.post("/manifests/{manifest_id}/confirm", response_model=HawbManifestOut)

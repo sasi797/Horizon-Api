@@ -121,8 +121,12 @@ class HawbManifestOut(BaseModel):
     total_weight_kg: float
     status: str
     exported_at: datetime | None
+    cancelled_at: datetime | None
     start_point: str | None
     end_point: str | None
+    job_reference: str | None
+    account_number: str | None
+    vehicle_size: str | None
     created_by: UUID | None
     created_by_name: str | None
     source_kind: str
@@ -153,6 +157,9 @@ class HawbJobPendingUpdateOut(BaseModel):
 class ManifestUpdate(BaseModel):
     start_point: str | None = None
     end_point: str | None = None
+    job_reference: str | None = None
+    account_number: str | None = None
+    vehicle_size: str | None = None
 
 
 class ManifestReorder(BaseModel):

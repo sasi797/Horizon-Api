@@ -210,6 +210,10 @@ async def ingest_email_batch(
                 )
                 db.add(manifest)
                 await db.flush()
+                # doc_jobs accumulates in match/merge-phase order (blind-matched jobs
+                # first, then leftover unmatched jobs), not page order — re-sort by
+                # page_start so the default run order follows the source PDF.
+                doc_jobs.sort(key=lambda j: j.page_start if j.page_start is not None else 0)
                 for sequence, hawb_job in enumerate(doc_jobs, start=1):
                     hawb_job.manifest_id = manifest.id
                     hawb_job.manifest_sequence = sequence
