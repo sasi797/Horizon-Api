@@ -221,12 +221,33 @@ async def _extract_and_create_document(
     db, att: dict, *, source_kind: str,
     source_message_id: str | None, sender_email: str | None, subject: str | None, email_body: str | None,
 ):
+    from app.database import AsyncSessionLocal
     from app.models.hawb import HawbDocument
 
     file_bytes = att.get("data") or b""
     filename = att.get("filename") or "document.pdf"
     key = f"{settings.s3_prefix}/hawb/{source_message_id or 'manual'}/{filename}"
     await upload_bytes(file_bytes, key, content_type="application/pdf")
+
+    # Commit a "processing" row immediately, in its own short transaction, so the
+    # UI's live-refresh shows the email arrived right away — the extraction call
+    # below is a real AI call and can take several seconds on its own.
+    async with AsyncSessionLocal() as pre_db:
+        pending_doc = HawbDocument(
+            source_message_id=source_message_id,
+            sender_email=sender_email,
+            subject=subject,
+            filename=filename,
+            storage_bucket=settings.s3_bucket or "horizon-dev",
+            storage_key=key,
+            job_count=0,
+            status="processing",
+            source_kind=source_kind,
+            email_body_text=email_body,
+        )
+        pre_db.add(pending_doc)
+        await pre_db.commit()
+        doc_id = pending_doc.id
 
     extractor = hawb_extract.extract_blind_candidates if source_kind == "blind" else hawb_extract.extract_jobs
     error_message: str | None = None
@@ -237,21 +258,12 @@ async def _extract_and_create_document(
         jobs_data = []
         error_message = f"Extraction failed: {e}"
 
-    document = HawbDocument(
-        source_message_id=source_message_id,
-        sender_email=sender_email,
-        subject=subject,
-        filename=filename,
-        storage_bucket=settings.s3_bucket or "horizon-dev",
-        storage_key=key,
-        processed_at=datetime.now(timezone.utc),
-        job_count=0,
-        status="failed" if error_message else "processed",
-        error_message=error_message,
-        source_kind=source_kind,
-        email_body_text=email_body,
-    )
-    db.add(document)
+    # Re-fetch into the batch's own session so job/manifest linkage below (job_count,
+    # error_message, relationships) commits atomically with the rest of the batch.
+    document = await db.get(HawbDocument, doc_id)
+    document.processed_at = datetime.now(timezone.utc)
+    document.status = "failed" if error_message else "processed"
+    document.error_message = error_message
     return document, jobs_data
 
 

@@ -230,6 +230,19 @@ async def dismiss_job_update(
     return HawbJobPendingUpdateOut.model_validate(update)
 
 
+@router.get("/documents/processing", response_model=list[HawbDocumentOut])
+async def list_processing_documents(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Documents whose extraction hasn't finished yet — lets the UI show an
+    "email received, processing…" indicator before a manifest exists to show."""
+    result = await db.execute(
+        select(HawbDocument).where(HawbDocument.status == "processing").order_by(HawbDocument.received_at.desc())
+    )
+    return [HawbDocumentOut.model_validate(d) for d in result.scalars().all()]
+
+
 @router.get("/manifests", response_model=list[HawbManifestOut])
 async def list_manifests(
     source_kind: str | None = Query(None),

@@ -509,6 +509,14 @@ async def _poll_inbox_async():
                 except Exception as e:
                     print(f"[BTS] HAWB ingest error for {raw_message_id[:40]}…: {e}")
 
+            # Mark the message read once we've attempted it — independent of whatever
+            # the (separate, legacy) booking pipeline below does with it, so a HAWB
+            # email doesn't stay unread just because booking creation errors out first.
+            try:
+                _graph_mark_read(client, token, mailbox, graph_msg_id)
+            except Exception as e:
+                print(f"[BTS] Mark-as-read failed for {graph_msg_id}: {e}")
+
             # Threading headers
             in_reply_to = _get_internet_header(msg, "In-Reply-To")
             references = _get_internet_header(msg, "References")
