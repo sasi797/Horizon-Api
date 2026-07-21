@@ -132,6 +132,7 @@ class HawbManifestOut(BaseModel):
     source_kind: str
     created_at: datetime
     hawb_numbers: list[str] = []
+    remarks: str | None = None
 
 
 class HawbManifestDetailOut(HawbManifestOut):

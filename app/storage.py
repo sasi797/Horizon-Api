@@ -34,6 +34,15 @@ async def upload_bytes(data: bytes, key: str, content_type: str = "application/o
     return await loop.run_in_executor(None, partial(upload_bytes_sync, data, key, content_type))
 
 
+def download_bytes_sync(key: str) -> bytes:
+    return _client().get_object(Bucket=settings.s3_bucket, Key=key)["Body"].read()
+
+
+async def download_bytes(key: str) -> bytes:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(download_bytes_sync, key))
+
+
 def presigned_url_sync(key: str, expires: int = 3600) -> str:
     return _client().generate_presigned_url(
         "get_object",

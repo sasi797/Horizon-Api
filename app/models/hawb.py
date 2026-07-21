@@ -32,11 +32,13 @@ class HawbDocument(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
     email_body_text: Mapped[str | None] = mapped_column(Text)
+    manifest_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_manifests.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     jobs: Mapped[list["HawbJob"]] = relationship(
         "HawbJob", back_populates="document", cascade="all, delete-orphan", foreign_keys="HawbJob.document_id"
     )
+    manifest: Mapped["HawbManifest | None"] = relationship("HawbManifest", foreign_keys=[manifest_id], lazy="selectin")
 
 
 class HawbManifest(Base):

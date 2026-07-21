@@ -310,7 +310,12 @@ def _plain_text_from_html(html: str) -> str:
 
 def _graph_mark_read(client: httpx.Client, token: str, mailbox: str, msg_id: str):
     url = f"{GRAPH_BASE}/users/{mailbox}/messages/{msg_id}"
-    client.patch(url, headers=_graph_headers(token), json={"isRead": True})
+    resp = client.patch(url, headers=_graph_headers(token), json={"isRead": True})
+    if resp.status_code >= 400:
+        # Doesn't raise — callers shouldn't abort the poll over this — but a failure
+        # here used to be silently discarded (e.g. a 403 when the Graph app registration
+        # lacks Mail.ReadWrite), leaving no trace of why messages never show as read.
+        print(f"[BTS] Mark-as-read failed for {msg_id} ({resp.status_code}): {resp.text[:200]}")
 
 
 def _graph_get_sent_items(client: httpx.Client, token: str, mailbox: str, lookback_minutes: int = 60) -> list[dict]:
@@ -488,14 +493,21 @@ async def _poll_inbox_async():
             # Attachments (inline images embedded into HTML as data URIs; regular files go to S3)
             raw_attachments: list[dict] = []
             if msg.get("hasAttachments"):
-                raw_attachments, inline_map = _graph_get_attachments(client, token, mailbox, graph_msg_id)
-                if inline_map and body_html:
-                    body_html = _apply_inline_images(body_html, inline_map)
+                try:
+                    raw_attachments, inline_map = _graph_get_attachments(client, token, mailbox, graph_msg_id)
+                    if inline_map and body_html:
+                        body_html = _apply_inline_images(body_html, inline_map)
+                except Exception as e:
+                    # A transport-level failure here must not abort every remaining message
+                    # in this poll cycle — log and move on. This message keeps no dedup claim,
+                    # so it's retried naturally on the next poll rather than lost.
+                    print(f"[BTS] Attachment fetch failed for {graph_msg_id}: {e}")
+                    continue
 
-            # HAWB pipeline — runs independently of booking creation below, filtered to
-            # PDF attachments only, deduped via its own hawb_processed_emails table.
-            pdf_attachments = [a for a in raw_attachments if (a.get("filename") or "").lower().endswith(".pdf")]
-            if pdf_attachments and raw_message_id:
+            # HAWB pipeline — runs independently of booking creation below. Classification of
+            # what's a usable plain PDF vs. blind vs. unprocessable happens inside hawb_ingest,
+            # deduped via its own hawb_processed_emails table.
+            if raw_attachments and raw_message_id:
                 try:
                     from app.services import hawb_ingest
                     hawb_body_text = body_text or (_plain_text_from_html(body_html) if body_html else None)
@@ -503,7 +515,7 @@ async def _poll_inbox_async():
                         message_id=raw_message_id,
                         sender_email=sender_email,
                         subject=subject,
-                        pdf_attachments=pdf_attachments,
+                        pdf_attachments=raw_attachments,
                         body_text=hawb_body_text,
                     )
                 except Exception as e:

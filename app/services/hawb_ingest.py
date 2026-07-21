@@ -17,18 +17,32 @@ def _is_blind_filename(filename: str) -> bool:
     return "mf-pcs" in filename.lower()
 
 
+# Anthropic's documented PDF limit for the Messages API — a plain attachment
+# larger than this can never be extracted, so it's recorded as unprocessable
+# up front rather than attempted and failing inside the API call.
+MAX_PDF_SIZE_BYTES = 32 * 1024 * 1024
+
+
 async def process_email_attachments(
     *, message_id: str, sender_email: str, subject: str, pdf_attachments: list[dict], body_text: str | None = None
 ) -> None:
-    """Entry point called from the email poll loop for one inbound message."""
+    """Entry point called from the email poll loop for one inbound message.
+
+    Despite the parameter name (kept for call-site stability), this is every
+    non-inline attachment on the message, not just ones already confirmed to
+    be usable PDFs — that classification happens in `ingest_email_batch`."""
     from app.database import AsyncSessionLocal
     from app.models.hawb import HawbProcessedEmail
 
+    # Claim the message_id up front (insert, not just select) so two near-
+    # simultaneous webhook deliveries for the same message can't both slip
+    # past a check-then-insert-later race and double-ingest the same PDFs.
     async with AsyncSessionLocal() as db:
-        exists = await db.scalar(
-            select(HawbProcessedEmail.message_id).where(HawbProcessedEmail.message_id == message_id).limit(1)
+        result = await db.execute(
+            pg_insert(HawbProcessedEmail).values(message_id=message_id).on_conflict_do_nothing()
         )
-        if exists:
+        await db.commit()
+        if result.rowcount == 0:
             return
 
     try:
@@ -39,15 +53,9 @@ async def process_email_attachments(
     except Exception:
         logger.error("HAWB batch ingest failed for message %s", message_id, exc_info=True)
 
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            pg_insert(HawbProcessedEmail).values(message_id=message_id).on_conflict_do_nothing()
-        )
-        await db.commit()
-
 
 async def ingest_email_batch(
-    pdf_attachments: list[dict], *,
+    attachments: list[dict], *,
     source_message_id: str | None, sender_email: str | None, subject: str | None, email_body: str | None,
 ):
     """Extract every PDF attachment in one email, cross-reference plain-label
@@ -63,14 +71,52 @@ async def ingest_email_batch(
     "One PDF in, one manifest out" still holds for plain documents (and for
     MF-PCS documents whose jobs go unmatched); a merged blind job attaches to
     its plain document's manifest instead of getting one of its own.
+
+    Every plain document already has its manifest by the time this function
+    runs — `_extract_and_create_document` creates it up front (status
+    "extracting") so it's visible in the UI before extraction even starts.
+    This function only ever updates that placeholder in place (to "open" with
+    real totals, or "failed" if nothing new landed on it) — it never creates a
+    manifest for a plain document. Blind documents are unaffected by this and
+    keep getting a manifest created after the fact, only if unmatched jobs
+    land on them, exactly as before this feature existed.
+
+    A non-blind attachment that can never be extracted — not a PDF, empty
+    content, or too large for Anthropic's API — still gets a manifest (status
+    "failed" immediately, no "extracting" step, since the outcome is already
+    known) so nothing lands in the inbox and vanishes without a trace. Blind
+    (MF-PCS) attachments are exempt from this — an unusable blind attachment
+    is silently skipped, exactly as before this feature existed.
     """
     from app.database import AsyncSessionLocal
-    from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbManifest
+    from app.models.hawb import HawbDocument, HawbManifest
 
-    blind_atts = [a for a in pdf_attachments if _is_blind_filename(a.get("filename") or "")]
-    plain_atts = [a for a in pdf_attachments if not _is_blind_filename(a.get("filename") or "")]
+    blind_atts = [a for a in attachments if _is_blind_filename(a.get("filename") or "")]
+    non_blind_atts = [a for a in attachments if not _is_blind_filename(a.get("filename") or "")]
+
+    plain_atts: list[dict] = []
+    unprocessable_atts: list[tuple[dict, str]] = []
+    for att in non_blind_atts:
+        filename = att.get("filename") or ""
+        data = att.get("data") or b""
+        if not filename.lower().endswith(".pdf"):
+            unprocessable_atts.append((att, f"'{filename}' is not a PDF file — HAWB extraction only supports PDF attachments."))
+        elif not data:
+            unprocessable_atts.append((att, f"'{filename}' could not be retrieved from the email (no content returned)."))
+        elif len(data) > MAX_PDF_SIZE_BYTES:
+            size_mb = len(data) / (1024 * 1024)
+            unprocessable_atts.append((att, f"'{filename}' is {size_mb:.1f} MB, which exceeds the {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB maximum PDF size supported for extraction."))
+        else:
+            plain_atts.append(att)
 
     async with AsyncSessionLocal() as db:
+        # --- Unprocessable attachments: no extraction attempt, outcome already known ---
+        for att, reason in unprocessable_atts:
+            await _record_unprocessable_attachment(
+                db, att, reason,
+                source_message_id=source_message_id, sender_email=sender_email, subject=subject, email_body=email_body,
+            )
+
         # --- Extract phase: one HawbDocument per attachment, jobs held in memory ---
         plain_entries: list[tuple[HawbDocument, list[dict]]] = []
         for att in plain_atts:
@@ -99,7 +145,7 @@ async def ingest_email_batch(
                     plain_by_hawb[hawb_number] = (doc, job)
 
         merged_hawb_numbers: set[str] = set()
-        jobs_to_insert: list[HawbJob] = []
+        jobs_to_insert = []
 
         # --- Merge phase: resolve each MF-PCS candidate against its plain companion ---
         for blind_doc, blind_jobs_data in blind_entries:
@@ -142,83 +188,178 @@ async def ingest_email_batch(
                     source_kind="plain", status="ready_to_manifest",
                 ))
 
-        # --- Dedup against existing hawb_numbers: insert new, or queue a pending update ---
-        # A hawb_number that already has a job is never silently dropped and never
-        # auto-applied (even to an already-exported job) — it's queued for manual
-        # review. If either side is blind-sourced, the "duplicate" usually isn't
-        # one at all: it's the missing plain/MF-PCS companion for an existing job
-        # that was persisted unmatched, now arriving in a later email — that case
-        # gets a real merge (same as the in-email merge path) instead of a plain
-        # field diff.
-        inserted_by_document: dict[uuid.UUID, list[HawbJob]] = {}
-        skip_notes_by_document: dict[uuid.UUID, list[str]] = {}
-        for job_row in jobs_to_insert:
-            existing = await db.scalar(select(HawbJob).where(HawbJob.hawb_number == job_row.hawb_number))
-            if existing:
-                is_merge_case = job_row.source_kind == "blind" or existing.source_kind == "blind"
-                if is_merge_case:
-                    if job_row.source_kind == "blind":
-                        blind_data, plain_data = job_row.extracted_data, existing.extracted_data
-                    else:
-                        blind_data, plain_data = existing.extracted_data, job_row.extracted_data
-                    try:
-                        proposed_data = await asyncio.get_event_loop().run_in_executor(
-                            None, hawb_extract.merge_blind_job, plain_data, blind_data, email_body
-                        )
-                    except Exception:
-                        logger.error("HAWB pending-update merge failed for %s", job_row.hawb_number, exc_info=True)
-                        proposed_data = job_row.extracted_data
-                    reason = "blind_companion_merge"
-                    note = f"Companion match found for existing HAWB, queued for review: {job_row.hawb_number}"
-                else:
-                    proposed_data = job_row.extracted_data
-                    reason = "duplicate_resend"
-                    note = f"Duplicate HAWB queued for review: {job_row.hawb_number}"
+        inserted_by_document, skip_notes_by_document = await _dedupe_and_insert_jobs(db, jobs_to_insert, email_body)
+        await db.flush()
 
-                db.add(HawbJobPendingUpdate(
-                    job_id=existing.id,
-                    source_document_id=job_row.document_id,
-                    reason=reason,
-                    proposed_data=proposed_data,
-                ))
-                skip_notes_by_document.setdefault(job_row.document_id, []).append(note)
-                continue
-            db.add(job_row)
-            inserted_by_document.setdefault(job_row.document_id, []).append(job_row)
+        # --- Plain documents: reuse (never recreate) the placeholder manifest created up front ---
+        for doc, _ in plain_entries:
+            manifest = await db.get(HawbManifest, doc.manifest_id)
+            await _apply_plain_extraction_outcome(
+                doc, manifest, inserted_by_document.get(doc.id, []), skip_notes_by_document.get(doc.id, []),
+            )
 
-        all_docs = [doc for doc, _ in plain_entries] + [doc for doc, _ in blind_entries]
-        for doc in all_docs:
-            doc_jobs = inserted_by_document.get(doc.id, [])
-            doc.job_count = len(doc_jobs)
+        # --- Blind documents: unchanged — own manifest only if unmatched jobs landed on them ---
+        for doc, _ in blind_entries:
+            doc_jobs = inserted_by_document.get(doc.id)
             notes = skip_notes_by_document.get(doc.id)
+            doc.job_count = len(doc_jobs) if doc_jobs else 0
             if notes:
                 note = "; ".join(notes)
                 doc.error_message = note if not doc.error_message else f"{doc.error_message}; {note}"
-
-        # --- Manifest creation: one per document that ended up with jobs attached to it ---
-        if inserted_by_document:
+            if not doc_jobs:
+                continue
+            manifest = HawbManifest(
+                job_count=len(doc_jobs),
+                total_weight_kg=sum((j.weight_kg or 0) for j in doc_jobs),
+                created_by=None,
+                source_kind="blind" if any(j.source_kind == "blind" for j in doc_jobs) else "plain",
+            )
+            db.add(manifest)
             await db.flush()
-            for doc in all_docs:
-                doc_jobs = inserted_by_document.get(doc.id)
-                if not doc_jobs:
-                    continue
-                manifest = HawbManifest(
-                    job_count=len(doc_jobs),
-                    total_weight_kg=sum((j.weight_kg or 0) for j in doc_jobs),
-                    created_by=None,
-                    source_kind="blind" if any(j.source_kind == "blind" for j in doc_jobs) else "plain",
-                )
-                db.add(manifest)
-                await db.flush()
-                # doc_jobs accumulates in match/merge-phase order (blind-matched jobs
-                # first, then leftover unmatched jobs), not page order — re-sort by
-                # page_start so the default run order follows the source PDF.
-                doc_jobs.sort(key=lambda j: j.page_start if j.page_start is not None else 0)
-                for sequence, hawb_job in enumerate(doc_jobs, start=1):
-                    hawb_job.manifest_id = manifest.id
-                    hawb_job.manifest_sequence = sequence
+            # doc_jobs accumulates in match/merge-phase order (blind-matched jobs
+            # first, then leftover unmatched jobs), not page order — re-sort by
+            # page_start so the default run order follows the source PDF.
+            doc_jobs.sort(key=lambda j: j.page_start if j.page_start is not None else 0)
+            for sequence, hawb_job in enumerate(doc_jobs, start=1):
+                hawb_job.manifest_id = manifest.id
+                hawb_job.manifest_sequence = sequence
 
         await db.commit()
+
+
+async def _dedupe_and_insert_jobs(db, jobs_to_insert: list, email_body: str | None):
+    """Dedup against existing hawb_numbers: insert new, or queue a pending update.
+
+    A hawb_number that already has a job is never silently dropped and never
+    auto-applied (even to an already-exported job) — it's queued for manual
+    review. If either side is blind-sourced, the "duplicate" usually isn't
+    one at all: it's the missing plain/MF-PCS companion for an existing job
+    that was persisted unmatched, now arriving in a later email — that case
+    gets a real merge (same as the in-email merge path) instead of a plain
+    field diff.
+
+    Returns (inserted_by_document, skip_notes_by_document), both keyed by
+    HawbDocument id.
+    """
+    from app.models.hawb import HawbJob, HawbJobPendingUpdate
+
+    inserted_by_document: dict[uuid.UUID, list] = {}
+    skip_notes_by_document: dict[uuid.UUID, list[str]] = {}
+    for job_row in jobs_to_insert:
+        existing = await db.scalar(select(HawbJob).where(HawbJob.hawb_number == job_row.hawb_number))
+        if existing:
+            is_merge_case = job_row.source_kind == "blind" or existing.source_kind == "blind"
+            if is_merge_case:
+                if job_row.source_kind == "blind":
+                    blind_data, plain_data = job_row.extracted_data, existing.extracted_data
+                else:
+                    blind_data, plain_data = existing.extracted_data, job_row.extracted_data
+                try:
+                    proposed_data = await asyncio.get_event_loop().run_in_executor(
+                        None, hawb_extract.merge_blind_job, plain_data, blind_data, email_body
+                    )
+                except Exception:
+                    logger.error("HAWB pending-update merge failed for %s", job_row.hawb_number, exc_info=True)
+                    proposed_data = job_row.extracted_data
+                reason = "blind_companion_merge"
+                note = f"Companion match found for existing HAWB, queued for review: {job_row.hawb_number}"
+            else:
+                proposed_data = job_row.extracted_data
+                reason = "duplicate_resend"
+                note = f"Duplicate HAWB queued for review: {job_row.hawb_number}"
+
+            db.add(HawbJobPendingUpdate(
+                job_id=existing.id,
+                source_document_id=job_row.document_id,
+                reason=reason,
+                proposed_data=proposed_data,
+            ))
+            skip_notes_by_document.setdefault(job_row.document_id, []).append(note)
+            continue
+        db.add(job_row)
+        inserted_by_document.setdefault(job_row.document_id, []).append(job_row)
+
+    return inserted_by_document, skip_notes_by_document
+
+
+async def _apply_plain_extraction_outcome(document, manifest, doc_jobs: list, notes: list[str]) -> None:
+    """Update a plain document + its (always-preexisting) placeholder manifest
+    once extraction/dedup for that document has finished. Never creates a new
+    manifest — plain documents already have one via `manifest_id`, created up
+    front in `_extract_and_create_document` before extraction ever ran."""
+    document.job_count = len(doc_jobs)
+    if notes:
+        note = "; ".join(notes)
+        document.error_message = note if not document.error_message else f"{document.error_message}; {note}"
+
+    if doc_jobs:
+        manifest.job_count = len(doc_jobs)
+        manifest.total_weight_kg = sum((j.weight_kg or 0) for j in doc_jobs)
+        manifest.source_kind = "blind" if any(j.source_kind == "blind" for j in doc_jobs) else "plain"
+        manifest.status = "open"
+        doc_jobs.sort(key=lambda j: j.page_start if j.page_start is not None else 0)
+        for sequence, hawb_job in enumerate(doc_jobs, start=1):
+            hawb_job.manifest_id = manifest.id
+            hawb_job.manifest_sequence = sequence
+    else:
+        # Extraction failed (document.status == "failed") OR every extracted HAWB
+        # was a duplicate (document.status == "processed" but nothing new to
+        # manifest) — both collapse to the same visible state by product
+        # decision: simpler than a third status, and retrying is harmless
+        # either way (it just re-runs the same idempotent extract+dedupe).
+        manifest.status = "failed"
+        manifest.job_count = 0
+        manifest.total_weight_kg = 0.0
+
+
+async def _record_unprocessable_attachment(
+    db, att: dict, reason: str, *,
+    source_message_id: str | None, sender_email: str | None, subject: str | None, email_body: str | None,
+) -> None:
+    """A non-blind attachment that can never be extracted (wrong file type, no
+    content, too large) — no extraction attempt is made since the outcome is
+    already known, so this skips straight to a failed manifest + document
+    instead of going through the extracting-first two-phase commit."""
+    from app.models.hawb import HawbDocument, HawbManifest
+
+    file_bytes = att.get("data") or b""
+    filename = att.get("filename") or "attachment"
+    key = f"{settings.s3_prefix}/hawb/{source_message_id or 'manual'}/{filename}"
+    await upload_bytes(file_bytes, key, content_type="application/octet-stream")
+
+    manifest = HawbManifest(
+        job_count=0, total_weight_kg=0.0, status="failed",
+        source_kind="plain", created_by=None,
+    )
+    db.add(manifest)
+    await db.flush()
+
+    document = HawbDocument(
+        source_message_id=source_message_id,
+        sender_email=sender_email,
+        subject=subject,
+        filename=filename,
+        storage_bucket=settings.s3_bucket or "horizon-dev",
+        storage_key=key,
+        job_count=0,
+        status="failed",
+        error_message=reason,
+        source_kind="plain",
+        email_body_text=email_body,
+        manifest_id=manifest.id,
+        processed_at=datetime.now(timezone.utc),
+    )
+    db.add(document)
+
+
+async def _run_extraction_for_document(file_bytes: bytes, filename: str, source_kind: str):
+    extractor = hawb_extract.extract_blind_candidates if source_kind == "blind" else hawb_extract.extract_jobs
+    try:
+        jobs_data = await asyncio.get_event_loop().run_in_executor(None, extractor, file_bytes, filename)
+        return jobs_data, None
+    except Exception as e:
+        logger.error("HAWB extraction failed for %s", filename, exc_info=True)
+        return [], f"Extraction failed: {e}"
 
 
 async def _extract_and_create_document(
@@ -226,7 +367,7 @@ async def _extract_and_create_document(
     source_message_id: str | None, sender_email: str | None, subject: str | None, email_body: str | None,
 ):
     from app.database import AsyncSessionLocal
-    from app.models.hawb import HawbDocument
+    from app.models.hawb import HawbDocument, HawbManifest
 
     file_bytes = att.get("data") or b""
     filename = att.get("filename") or "document.pdf"
@@ -235,8 +376,22 @@ async def _extract_and_create_document(
 
     # Commit a "processing" row immediately, in its own short transaction, so the
     # UI's live-refresh shows the email arrived right away — the extraction call
-    # below is a real AI call and can take several seconds on its own.
+    # below is a real AI call and can take several seconds on its own. Plain
+    # attachments also get a placeholder manifest in this same transaction, so a
+    # manifest row is visible in the UI before extraction even starts; blind
+    # (MF-PCS) attachments never get one — they only ever appear after the fact,
+    # once matched/merged, exactly as before this feature existed.
     async with AsyncSessionLocal() as pre_db:
+        manifest_id = None
+        if source_kind == "plain":
+            placeholder_manifest = HawbManifest(
+                job_count=0, total_weight_kg=0.0, status="extracting",
+                source_kind="plain", created_by=None,
+            )
+            pre_db.add(placeholder_manifest)
+            await pre_db.flush()
+            manifest_id = placeholder_manifest.id
+
         pending_doc = HawbDocument(
             source_message_id=source_message_id,
             sender_email=sender_email,
@@ -248,19 +403,13 @@ async def _extract_and_create_document(
             status="processing",
             source_kind=source_kind,
             email_body_text=email_body,
+            manifest_id=manifest_id,
         )
         pre_db.add(pending_doc)
         await pre_db.commit()
         doc_id = pending_doc.id
 
-    extractor = hawb_extract.extract_blind_candidates if source_kind == "blind" else hawb_extract.extract_jobs
-    error_message: str | None = None
-    try:
-        jobs_data = await asyncio.get_event_loop().run_in_executor(None, extractor, file_bytes, filename)
-    except Exception as e:
-        logger.error("HAWB extraction failed for %s", filename, exc_info=True)
-        jobs_data = []
-        error_message = f"Extraction failed: {e}"
+    jobs_data, error_message = await _run_extraction_for_document(file_bytes, filename, source_kind)
 
     # Re-fetch into the batch's own session so job/manifest linkage below (job_count,
     # error_message, relationships) commits atomically with the rest of the batch.
@@ -269,6 +418,46 @@ async def _extract_and_create_document(
     document.status = "failed" if error_message else "processed"
     document.error_message = error_message
     return document, jobs_data
+
+
+async def retry_document_extraction(document_id: uuid.UUID) -> None:
+    """Re-run extraction for one already-stored plain PDF, in isolation from the
+    rest of its original email. Scoped to this single document only — no
+    cross-email blind/plain re-matching (that's a batch-time-only concern;
+    blind attachments never get a placeholder or a retry in the first place).
+    The caller (router) has already flipped the manifest/document to
+    "extracting"/"processing" before scheduling this, so this function is
+    free to run start-to-finish in one session."""
+    from app.database import AsyncSessionLocal
+    from app.models.hawb import HawbDocument, HawbManifest
+    from app.storage import download_bytes
+
+    async with AsyncSessionLocal() as db:
+        document = await db.get(HawbDocument, document_id)
+        manifest = await db.get(HawbManifest, document.manifest_id)
+
+        try:
+            file_bytes = await download_bytes(document.storage_key)
+            jobs_data, error_message = await _run_extraction_for_document(file_bytes, document.filename, "plain")
+        except Exception as e:
+            logger.error("HAWB retry extraction failed for document %s", document_id, exc_info=True)
+            jobs_data, error_message = [], f"Extraction failed: {e}"
+
+        document.processed_at = datetime.now(timezone.utc)
+        document.status = "failed" if error_message else "processed"
+        document.error_message = error_message
+
+        jobs_to_insert = [
+            _build_job_row(job, document_id=document.id, blind_document_id=None,
+                            source_kind="plain", status="ready_to_manifest")
+            for job in jobs_data if (job.get("hawb_number") or "").strip()
+        ]
+        inserted_by_document, skip_notes_by_document = await _dedupe_and_insert_jobs(db, jobs_to_insert, document.email_body_text)
+        await db.flush()
+        await _apply_plain_extraction_outcome(
+            document, manifest, inserted_by_document.get(document.id, []), skip_notes_by_document.get(document.id, []),
+        )
+        await db.commit()
 
 
 def _build_job_row(job: dict, *, document_id, blind_document_id, source_kind: str, status: str):

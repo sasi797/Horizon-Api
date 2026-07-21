@@ -4,7 +4,7 @@ import math
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,7 @@ from app.schemas.hawb import (
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
     HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
 )
-from app.services.hawb_ingest import _parse_dt
+from app.services.hawb_ingest import _parse_dt, retry_document_extraction
 from app.storage import presigned_url
 
 router = APIRouter(prefix="/hawb", tags=["hawb"])
@@ -256,6 +256,7 @@ async def list_manifests(
     manifests = result.scalars().all()
 
     hawb_numbers_by_manifest: dict[UUID, list[str]] = {}
+    remarks_by_manifest: dict[UUID, str] = {}
     if manifests:
         jobs_result = await db.execute(
             select(HawbJob.manifest_id, HawbJob.hawb_number)
@@ -265,10 +266,19 @@ async def list_manifests(
         for manifest_id, hawb_number in jobs_result.all():
             hawb_numbers_by_manifest.setdefault(manifest_id, []).append(hawb_number)
 
+        doc_result = await db.execute(
+            select(HawbDocument.manifest_id, HawbDocument.error_message)
+            .where(HawbDocument.manifest_id.in_([m.id for m in manifests]))
+        )
+        for manifest_id, error_message in doc_result.all():
+            if error_message:
+                remarks_by_manifest[manifest_id] = error_message
+
     return [
         HawbManifestOut(
-            **HawbManifestOut.model_validate(m).model_dump(exclude={"hawb_numbers"}),
+            **HawbManifestOut.model_validate(m).model_dump(exclude={"hawb_numbers", "remarks"}),
             hawb_numbers=hawb_numbers_by_manifest.get(m.id, []),
+            remarks=remarks_by_manifest.get(m.id),
         )
         for m in manifests
     ]
@@ -289,7 +299,25 @@ async def get_manifest(
     )
     jobs = jobs_result.scalars().all()
     if not jobs:
-        raise HTTPException(status_code=404, detail="Manifest has no jobs")
+        # A manifest with zero jobs is a real data bug for any settled status —
+        # but for a placeholder still extracting (or one that failed / had
+        # nothing new to manifest), it's expected: locate its source document
+        # via the reverse link instead of jobs[0].document.
+        if manifest.status not in ("extracting", "failed"):
+            raise HTTPException(status_code=404, detail="Manifest has no jobs")
+        document = await db.scalar(select(HawbDocument).where(HawbDocument.manifest_id == manifest_id))
+        if not document:
+            raise HTTPException(status_code=404, detail="Manifest has no linked document")
+        url = await presigned_url(document.storage_key)
+        manifest_out = HawbManifestOut.model_validate(manifest)
+        return HawbManifestDetailOut(
+            **manifest_out.model_dump(exclude={"hawb_numbers", "remarks"}),
+            hawb_numbers=[],
+            remarks=document.error_message,
+            jobs=[],
+            document=HawbDocumentOut.model_validate(document),
+            pdf_url=url,
+        )
 
     # Every job in a manifest comes from the same source PDF, so any one of
     # them points at the document to show in the PDF pane.
@@ -305,12 +333,43 @@ async def get_manifest(
 
     manifest_out = HawbManifestOut.model_validate(manifest)
     return HawbManifestDetailOut(
-        **manifest_out.model_dump(exclude={"hawb_numbers"}),
+        **manifest_out.model_dump(exclude={"hawb_numbers", "remarks"}),
         hawb_numbers=[j.hawb_number for j in jobs],
+        remarks=document.error_message,
         jobs=jobs_out,
         document=HawbDocumentOut.model_validate(document),
         pdf_url=url,
     )
+
+
+@router.post("/manifests/{manifest_id}/retry-extraction", response_model=HawbManifestOut)
+async def retry_manifest_extraction(
+    manifest_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run extraction for a failed plain-document manifest, reusing the PDF
+    already in storage — no need for the sender to resend the email."""
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status != "failed":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not failed")
+
+    document = await db.scalar(select(HawbDocument).where(HawbDocument.manifest_id == manifest_id))
+    if not document:
+        raise HTTPException(status_code=409, detail="No source document linked to this manifest")
+
+    manifest.status = "extracting"
+    document.status = "processing"
+    document.error_message = None
+    await db.commit()
+
+    background_tasks.add_task(retry_document_extraction, document.id)
+
+    manifest = await db.get(HawbManifest, manifest.id, populate_existing=True)
+    return HawbManifestOut.model_validate(manifest)
 
 
 @router.patch("/manifests/{manifest_id}", response_model=HawbManifestOut)
