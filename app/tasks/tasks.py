@@ -205,7 +205,7 @@ def _graph_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
-def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_sender: str, lookback_minutes: int = 1440) -> list[dict]:
+def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_senders: str, lookback_minutes: int = 1440) -> list[dict]:
     """Fetch inbound messages received in the last `lookback_minutes` across ALL folders.
 
     Queries the top-level /messages endpoint (not just Inbox) so emails that
@@ -214,6 +214,10 @@ def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_
     messages sent from the mailbox itself — outbound messages are handled separately
     by the Sent Items poller.
     ProcessedEmail dedup prevents reprocessing.
+
+    `allowed_senders` is comma-separated (one or more exact addresses); empty
+    allows any sender. Each address becomes its own `eq` clause, OR'd together —
+    Graph's OData filter has no case-insensitive "in" operator for this field.
     """
     from datetime import timedelta
     select_fields = (
@@ -225,8 +229,10 @@ def _graph_get_messages(client: httpx.Client, token: str, mailbox: str, allowed_
     # Note: Graph does not support `ne` on nested complex-type properties.
     # Outbound messages are filtered out in the processing loop via a Python check.
     filter_clause = f"receivedDateTime ge {since}"
-    if allowed_sender:
-        filter_clause += f" and from/emailAddress/address eq '{allowed_sender}'"
+    sender_list = [s.strip() for s in (allowed_senders or "").split(",") if s.strip()]
+    if sender_list:
+        sender_clause = " or ".join(f"from/emailAddress/address eq '{s}'" for s in sender_list)
+        filter_clause += f" and ({sender_clause})"
 
     messages = []
     url = None
@@ -400,7 +406,11 @@ async def _poll_inbox_async():
         await redis.aclose()
         return
 
-    # Parse cutoff datetime once
+    # Parse cutoff datetime once — this is only the floor/fallback, used as-is
+    # on a fresh environment (or if the dynamic advance below can't run). In
+    # normal operation the effective cutoff advances automatically below, so
+    # PROCESS_EMAILS_SINCE doesn't need manual bumping to avoid reprocessing
+    # old mail every poll.
     cutoff_dt: datetime | None = None
     if settings.PROCESS_EMAILS_SINCE:
         try:
@@ -409,6 +419,21 @@ async def _poll_inbox_async():
                 cutoff_dt = cutoff_dt.replace(tzinfo=timezone.utc)
         except ValueError:
             print(f"[BTS] Invalid PROCESS_EMAILS_SINCE format, ignoring: {settings.PROCESS_EMAILS_SINCE}")
+
+    # Advance the cutoff to the newest email HAWB has ever actually seen —
+    # hawb_documents gets a row for every attachment attempt (successful,
+    # failed, or unprocessable), so its max received_at is a reliable
+    # high-water mark. Falls back to the hardcoded value above whenever there's
+    # no history yet (first run, or that history was wiped, e.g. during testing).
+    try:
+        from sqlalchemy import func
+        from app.models.hawb import HawbDocument
+        async with AsyncSessionLocal() as _cutoff_db:
+            latest_seen = await _cutoff_db.scalar(select(func.max(HawbDocument.received_at)))
+        if latest_seen is not None and (cutoff_dt is None or latest_seen > cutoff_dt):
+            cutoff_dt = latest_seen
+    except Exception as e:
+        print(f"[BTS] Could not compute dynamic cutoff, using hardcoded fallback: {e}")
 
     with httpx.Client(timeout=30) as client:
         # ── Phase 1: Inbound messages ─────────────────────────────────────────
