@@ -145,11 +145,13 @@ async def list_job_updates(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = (
-        select(HawbJobPendingUpdate)
-        .where(HawbJobPendingUpdate.status == status)
-        .order_by(HawbJobPendingUpdate.created_at.desc())
-    )
+    """status="all" returns every pending/applied/dismissed record — used by
+    the merge-history view. Any other value (default "pending") filters to
+    an exact status match, as before."""
+    q = select(HawbJobPendingUpdate)
+    if status != "all":
+        q = q.where(HawbJobPendingUpdate.status == status)
+    q = q.order_by(HawbJobPendingUpdate.created_at.desc())
     result = await db.execute(q)
     return [HawbJobPendingUpdateOut.model_validate(u) for u in result.scalars().all()]
 

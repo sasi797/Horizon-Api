@@ -406,11 +406,16 @@ async def _poll_inbox_async():
         await redis.aclose()
         return
 
-    # Parse cutoff datetime once — this is only the floor/fallback, used as-is
-    # on a fresh environment (or if the dynamic advance below can't run). In
-    # normal operation the effective cutoff advances automatically below, so
-    # PROCESS_EMAILS_SINCE doesn't need manual bumping to avoid reprocessing
-    # old mail every poll.
+    # Deliberately static, not auto-advancing: hawb_documents.received_at is
+    # stamped with when WE processed a document, not the email's real send
+    # time, and this table is shared between every environment pointed at
+    # this database (local dev + production both use horizonexpress_dev).
+    # An earlier version of this function advanced the cutoff to
+    # MAX(hawb_documents.received_at) on every poll — a duplicate/retry test
+    # (or any environment's own out-of-order processing) advances that
+    # watermark past a genuinely new, still-unprocessed email's real receive
+    # time, permanently skipping it on every subsequent poll. Bump this value
+    # by hand when old history needs excluding.
     cutoff_dt: datetime | None = None
     if settings.PROCESS_EMAILS_SINCE:
         try:
@@ -419,21 +424,6 @@ async def _poll_inbox_async():
                 cutoff_dt = cutoff_dt.replace(tzinfo=timezone.utc)
         except ValueError:
             print(f"[BTS] Invalid PROCESS_EMAILS_SINCE format, ignoring: {settings.PROCESS_EMAILS_SINCE}")
-
-    # Advance the cutoff to the newest email HAWB has ever actually seen —
-    # hawb_documents gets a row for every attachment attempt (successful,
-    # failed, or unprocessable), so its max received_at is a reliable
-    # high-water mark. Falls back to the hardcoded value above whenever there's
-    # no history yet (first run, or that history was wiped, e.g. during testing).
-    try:
-        from sqlalchemy import func
-        from app.models.hawb import HawbDocument
-        async with AsyncSessionLocal() as _cutoff_db:
-            latest_seen = await _cutoff_db.scalar(select(func.max(HawbDocument.received_at)))
-        if latest_seen is not None and (cutoff_dt is None or latest_seen > cutoff_dt):
-            cutoff_dt = latest_seen
-    except Exception as e:
-        print(f"[BTS] Could not compute dynamic cutoff, using hardcoded fallback: {e}")
 
     with httpx.Client(timeout=30) as client:
         # ── Phase 1: Inbound messages ─────────────────────────────────────────
