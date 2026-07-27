@@ -13,7 +13,7 @@ from app.config import settings
 from app.redis_client import close_redis, get_redis
 from app.routers import (
     agents, allocations, attendance, auth, booking_config, bookings,
-    dashboard, email_messages, email_templates, events, graph_webhook,
+    dashboard, dropdown, email_messages, email_templates, events, graph_webhook,
     hawb, history, notifications, pending_queue, reports, roles, shifts, account_codes,
     upload, users,
 )
@@ -96,6 +96,7 @@ app.include_router(graph_webhook.router)
 app.include_router(upload.router)
 app.include_router(history.router)
 app.include_router(hawb.router)
+app.include_router(dropdown.router)
 
 
 @app.get("/health", tags=["health"])

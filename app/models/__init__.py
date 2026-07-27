@@ -9,9 +9,10 @@ from app.models.pending_queue import PendingQueue
 from app.models.email_message import EmailMessage, EmailAttachment
 from app.models.notification import Notification
 from app.models.booking_config import BookingConfig
+from app.models.dropdown import Dropdown00, Dropdown01
 
 __all__ = [
     "User", "Role", "Shift", "Agent", "Booking", "Attendance",
     "AllocationLog", "PendingQueue", "EmailMessage", "EmailAttachment",
-    "Notification", "BookingConfig",
+    "Notification", "BookingConfig", "Dropdown00", "Dropdown01",
 ]
