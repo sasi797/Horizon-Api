@@ -560,7 +560,7 @@ async def indigo_export_manifest(
         if not job_number:
             continue
         for job in group:
-            job.indigo_job_number = job_number
+            job.indigo_job_number = str(job_number)
 
     await db.commit()
 
