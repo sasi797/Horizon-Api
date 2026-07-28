@@ -100,6 +100,7 @@ class HawbJob(Base):
     direction: Mapped[str | None] = mapped_column(String(20))
     special_handling: Mapped[str | None] = mapped_column(Text)
     job_service_type: Mapped[str | None] = mapped_column(String(30))
+    indigo_job_number: Mapped[str | None] = mapped_column(String(50))
     packages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     extracted_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")

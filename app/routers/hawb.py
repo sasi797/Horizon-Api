@@ -14,8 +14,9 @@ from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbMan
 from app.models.user import User
 from app.schemas.hawb import (
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
-    HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
+    HawbManifestDetailOut, HawbManifestOut, IndigoExportRequest, IndigoExportResponse, ManifestReorder, ManifestUpdate,
 )
+from app.services import indigo_export
 from app.services.hawb_ingest import _parse_dt, retry_document_extraction
 from app.storage import presigned_url
 
@@ -500,6 +501,70 @@ async def export_manifest(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{manifest.reference_number}.csv"'},
     )
+
+
+@router.post("/manifests/{manifest_id}/indigo-export", response_model=IndigoExportResponse)
+async def indigo_export_manifest(
+    manifest_id: UUID,
+    body: IndigoExportRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Book every job on this manifest with Indigo's AddJob and persist the
+    returned JobNumber against each HAWB. Runs server-side — Indigo's API has
+    no CORS support, so a direct browser call is blocked outright, and the
+    account credentials can't ship in the frontend bundle. See
+    Horizon-Web's docs/indigo-addjob-integration.md."""
+    manifest = await db.get(HawbManifest, manifest_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status != "open":
+        raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not open")
+
+    missing_fields = [
+        label for label, value in [
+            ("Account number", manifest.account_number),
+            ("Vehicle size", manifest.vehicle_size),
+        ] if not value
+    ]
+    if missing_fields:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Missing required fields before export: {', '.join(missing_fields)}",
+        )
+
+    jobs_result = await db.execute(
+        select(HawbJob).where(HawbJob.manifest_id == manifest_id).order_by(HawbJob.manifest_sequence)
+    )
+    jobs = jobs_result.scalars().all()
+    if not jobs:
+        raise HTTPException(status_code=409, detail="Manifest has no jobs to export")
+
+    # Same-route jobs (same shipper + consignee) collapse into one Indigo Job
+    # — a fact about the physical run, mirroring the frontend's routeGroups.
+    job_groups = indigo_export.group_jobs_by_route(list(jobs))
+    payload = indigo_export.build_indigo_addjob_payload(body.service_type, manifest, job_groups)
+
+    try:
+        data = await indigo_export.call_indigo_addjob(payload)
+    except indigo_export.IndigoRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    results = data.get("Jobs", {}).get("Job", [])
+
+    # Client asked that Indigo's JobNumber be persisted against every HAWB —
+    # including every member of a merged group, since they were all booked
+    # as the single Indigo Job at job_groups[i].
+    for result, group in zip(results, job_groups):
+        job_number = result.get("JobNumber")
+        if not job_number:
+            continue
+        for job in group:
+            job.indigo_job_number = job_number
+
+    await db.commit()
+
+    return IndigoExportResponse(results=results)
 
 
 @router.post("/manifests/{manifest_id}/cancel", response_model=HawbManifestOut)

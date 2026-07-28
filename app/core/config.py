@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # Random secret string — Graph echoes it back in every notification so we can verify it's genuine
     GRAPH_WEBHOOK_SECRET: str = "bts-webhook-secret-change-me"
 
+    # Indigo (NPA) AddJob integration — see docs/indigo-addjob-integration.md
+    # in Horizon-Web. Defaults are the SPLTEST sandbox account; override via
+    # .env with real credentials before this ever points at a live account.
+    INDIGO_BASE_URL: str = "https://apps.neilporterassociates.co.uk/iWebService/V1"
+    INDIGO_USERNAME: str = "SPLTEST"
+    INDIGO_PASSWORD: str = "SPLTest123!"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

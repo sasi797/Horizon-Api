@@ -35,6 +35,7 @@ class HawbJobOut(BaseModel):
     direction: str | None
     special_handling: str | None
     job_service_type: str | None
+    indigo_job_number: str | None
     packages: list[dict]
     extracted_data: dict
     source_kind: str
@@ -95,6 +96,7 @@ class HawbJobUpdate(BaseModel):
     direction: str | None = None
     special_handling: str | None = None
     job_service_type: str | None = None
+    indigo_job_number: str | None = None
 
     @field_validator("collection_at", "delivery_at")
     @classmethod
@@ -165,3 +167,22 @@ class ManifestUpdate(BaseModel):
 
 class ManifestReorder(BaseModel):
     job_ids: list[UUID]
+
+
+class IndigoExportRequest(BaseModel):
+    # Not persisted anywhere yet (see docs/indigo-addjob-integration.md —
+    # "ServiceType is the one remaining local-only value"), so the frontend
+    # sends whatever's currently selected in the UI on each export.
+    service_type: str
+
+
+class IndigoJobResult(BaseModel):
+    JobGuid: str | None = None
+    JobNumber: str | None = None
+    JobReference: str | None = None
+    ErrorCode: str | int | None = None
+    Errormessage: str | None = None
+
+
+class IndigoExportResponse(BaseModel):
+    results: list[IndigoJobResult]
