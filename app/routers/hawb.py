@@ -559,8 +559,9 @@ async def indigo_export_manifest(
         job_number = result.get("JobNumber")
         if not job_number:
             continue
+        result["JobNumber"] = str(job_number)
         for job in group:
-            job.indigo_job_number = str(job_number)
+            job.indigo_job_number = result["JobNumber"]
 
     await db.commit()
 
