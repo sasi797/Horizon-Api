@@ -11,6 +11,8 @@ account credentials must never ship in the frontend bundle.
 """
 
 import base64
+import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -19,6 +21,8 @@ import httpx
 
 from app.core.config import settings
 from app.models.hawb import HawbJob, HawbManifest
+
+logger = logging.getLogger(__name__)
 
 UK_POSTCODE_RE = re.compile(r"[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b", re.IGNORECASE)
 EIRCODE_RE = re.compile(r"[A-Z]\d{2}\s?[A-Z0-9]{4}\b", re.IGNORECASE)
@@ -170,6 +174,8 @@ async def call_indigo_addjob(payload: dict) -> dict:
     token = base64.b64encode(f"{settings.INDIGO_USERNAME}:{settings.INDIGO_PASSWORD}".encode()).decode()
     url = f"{settings.INDIGO_BASE_URL.rstrip('/')}/AddJob"
 
+    logger.info("Indigo AddJob request → %s\n%s", url, json.dumps(payload, indent=2))
+
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             response = await client.post(
@@ -182,7 +188,10 @@ async def call_indigo_addjob(payload: dict) -> dict:
                 },
             )
         except httpx.HTTPError as exc:
+            logger.error("Indigo AddJob request failed before a response arrived: %s", exc)
             raise IndigoRequestError(f"Could not reach Indigo: {exc}") from exc
+
+    logger.info("Indigo AddJob response ← %s\n%s", response.status_code, response.text[:2000])
 
     if response.status_code >= 400:
         raise IndigoRequestError(f"Indigo AddJob failed: {response.status_code} {response.text[:500]}")
