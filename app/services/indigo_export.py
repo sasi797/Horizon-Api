@@ -68,12 +68,6 @@ def city_and_postcode_line(value: str | None) -> dict:
     return {"town": "", "postcode": ""}
 
 
-def parse_dimensions(value: str | None) -> tuple[float, float, float]:
-    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", value or "")]
-    nums += [0.0, 0.0, 0.0]
-    return nums[0], nums[1], nums[2]
-
-
 def to_indigo_datetime(value: datetime | None) -> str:
     if value is None:
         return ""
@@ -97,73 +91,121 @@ def group_jobs_by_route(jobs: list[HawbJob]) -> list[list[HawbJob]]:
     return [groups[key] for key in order]
 
 
+def _matching_contact(address: str | None, jobs: list[HawbJob]) -> tuple[str, str]:
+    """Start point / End point are picked from one of this manifest's own HAWB
+    addresses (the exact same text as that job's shipper/consignee) — so the
+    contact/phone for the top-level Col/Del can be borrowed from whichever
+    HAWB that address actually came from, rather than left blank."""
+    if not address:
+        return "", ""
+    for job in jobs:
+        if job.shipper == address:
+            return job.shipper_contact or "", job.shipper_phone or ""
+        if job.consignee == address:
+            return job.consignee_contact or "", job.consignee_phone or ""
+    return "", ""
+
+
 def build_indigo_addjob_payload(
     service_type: str,
     manifest: HawbManifest,
     job_groups: list[list[HawbJob]],
 ) -> dict:
-    jobs_payload = []
-    for group in job_groups:
-        job = group[0]
-        length, width, height = parse_dimensions(job.dimensions)
-        col = city_and_postcode_line(job.shipper)
-        dele = city_and_postcode_line(job.consignee)
-        total_packs = sum(j.package_qty or 0 for j in group)
-        total_weight = sum(float(j.weight_kg or 0) for j in group)
-        special_insts = " — ".join(dict.fromkeys(j.special_handling for j in group if j.special_handling))
-        col_split = split_address(job.shipper)
-        del_split = split_address(job.consignee)
+    """One manifest books as exactly one Indigo Job: the top-level Col/Del is
+    the manifest's own Start point / End point (the vehicle's overall route),
+    and every HAWB stop in between — one per same-route group — rides along
+    as an AdditionalDrops entry, Collection or Delivery per that HAWB's own
+    job_service_type."""
+    col = city_and_postcode_line(manifest.start_point)
+    dele = city_and_postcode_line(manifest.end_point)
+    col_split = split_address(manifest.start_point)
+    del_split = split_address(manifest.end_point)
 
-        jobs_payload.append({
-            "JobGuid": uuid.uuid4().hex,
-            "CustomerNumber": manifest.account_number or "",
-            "ServiceType": service_type,
-            "VehicleType": manifest.vehicle_size or "",
-            "JobReference": job.hawb_number,
-            "JobReference2": "",
-            "BookedBy": "",
-            "RequestedBy": "Horizon Web",
-            "ColDateTime": to_indigo_datetime(job.collection_at),
-            "ColCompany": col_split["name"],
-            "ColContact": job.shipper_contact or "",
-            "ColAddress1": col_split["address"],
-            "ColAddress2": "",
-            "ColAddress3": "",
-            "ColTown": col["town"],
-            "ColPostcode": col["postcode"],
-            "ColCountry": address_country(job.shipper),
-            "ColTelephone": job.shipper_phone or "",
-            "ColEmail": "",
-            "ColInsts": "",
-            "ColReadyAt": "",
-            "ColPremisesClose": "",
-            "DelDateTime": to_indigo_datetime(job.delivery_at),
-            "DelCompany": del_split["name"],
-            "DelContact": job.consignee_contact or "",
-            "DelAddress1": del_split["address"],
-            "DelAddress2": "",
-            "DelAddress3": "",
-            "DelTown": dele["town"],
-            "DelPostcode": dele["postcode"],
-            "DelCountry": address_country(job.consignee),
-            "DelTelephone": job.consignee_phone or "",
-            "DelInsts": "",
-            "DelReadyAt": "",
-            "DelPremisesClose": "",
-            "Packs": total_packs,
-            "Weight": total_weight,
-            "SpecialInsts": special_insts,
-            "Length": length,
-            "Width": width,
-            "Height": height,
-            "Fragile": 0,
-            "Security": 0,
-            "ConsignmentNo": job.hawb_number,
-            "Insurance": 0,
-            "InsuranceValue": 0,
+    all_jobs = [job for group in job_groups for job in group]
+    total_packs = sum(j.package_qty or 0 for j in all_jobs)
+    total_weight = sum(float(j.weight_kg or 0) for j in all_jobs)
+    special_insts = " — ".join(dict.fromkeys(j.special_handling for j in all_jobs if j.special_handling))
+    col_contact, col_phone = _matching_contact(manifest.start_point, all_jobs)
+    del_contact, del_phone = _matching_contact(manifest.end_point, all_jobs)
+
+    drops = []
+    for drop_no, group in enumerate(job_groups, start=1):
+        job = group[0]
+        is_collection = job.job_service_type == "collection"
+        address = job.shipper if is_collection else job.consignee
+        addr_split = split_address(address)
+        addr_line = city_and_postcode_line(address)
+        drops.append({
+            "DropNo": str(drop_no),
+            "Type": "Collection" if is_collection else "Delivery",
+            "DateTime": to_indigo_datetime(job.collection_at if is_collection else job.delivery_at),
+            "Contact": (job.shipper_contact if is_collection else job.consignee_contact) or "",
+            "Company": addr_split["name"],
+            "Address1": addr_split["address"],
+            "Address2": "",
+            "Address3": "",
+            "Town": addr_line["town"],
+            "Postcode": addr_line["postcode"],
+            "Country": address_country(address),
+            "Telephone": (job.shipper_phone if is_collection else job.consignee_phone) or "",
+            "Insts": "",
+            "ReadyAt": "",
+            "PremisesClose": "",
+            "Packs": sum(j.package_qty or 0 for j in group),
+            "Weight": sum(float(j.weight_kg or 0) for j in group),
         })
 
-    return {"Jobs": {"Job": jobs_payload}}
+    job_payload = {
+        "JobGuid": uuid.uuid4().hex,
+        "CustomerNumber": manifest.account_number or "",
+        "ServiceType": service_type,
+        "VehicleType": manifest.vehicle_size or "",
+        "JobReference": manifest.job_reference or "",
+        "JobReference2": "",
+        "BookedBy": "",
+        "RequestedBy": "Horizon Web",
+        "ColDateTime": "",
+        "ColCompany": col_split["name"],
+        "ColContact": col_contact,
+        "ColAddress1": col_split["address"],
+        "ColAddress2": "",
+        "ColAddress3": "",
+        "ColTown": col["town"],
+        "ColPostcode": col["postcode"],
+        "ColCountry": address_country(manifest.start_point),
+        "ColTelephone": col_phone,
+        "ColEmail": "",
+        "ColInsts": "",
+        "ColReadyAt": "",
+        "ColPremisesClose": "",
+        "DelDateTime": "",
+        "DelCompany": del_split["name"],
+        "DelContact": del_contact,
+        "DelAddress1": del_split["address"],
+        "DelAddress2": "",
+        "DelAddress3": "",
+        "DelTown": dele["town"],
+        "DelPostcode": dele["postcode"],
+        "DelCountry": address_country(manifest.end_point),
+        "DelTelephone": del_phone,
+        "DelInsts": "",
+        "DelReadyAt": "",
+        "DelPremisesClose": "",
+        "AdditionalDrops": drops,
+        "Packs": total_packs,
+        "Weight": total_weight,
+        "SpecialInsts": special_insts,
+        "Length": 0,
+        "Width": 0,
+        "Height": 0,
+        "Fragile": 0,
+        "Security": 0,
+        "ConsignmentNo": manifest.job_reference or "",
+        "Insurance": 0,
+        "InsuranceValue": 0,
+    }
+
+    return {"Jobs": {"Job": [job_payload]}}
 
 
 class IndigoRequestError(Exception):

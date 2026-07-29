@@ -174,6 +174,9 @@ class IndigoExportRequest(BaseModel):
     # "ServiceType is the one remaining local-only value"), so the frontend
     # sends whatever's currently selected in the UI on each export.
     service_type: str
+    # When true, builds and returns the AddJob payload without calling Indigo
+    # or touching the DB — lets the payload be inspected before it's live.
+    dry_run: bool = False
 
 
 class IndigoJobResult(BaseModel):
@@ -186,3 +189,4 @@ class IndigoJobResult(BaseModel):
 
 class IndigoExportResponse(BaseModel):
     results: list[IndigoJobResult]
+    payload: dict | None = None

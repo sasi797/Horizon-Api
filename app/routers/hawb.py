@@ -510,11 +510,13 @@ async def indigo_export_manifest(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Book every not-yet-booked job on this manifest with Indigo's AddJob and
-    persist the returned JobNumber against each HAWB. Runs server-side —
-    Indigo's API has no CORS support, so a direct browser call is blocked
-    outright, and the account credentials can't ship in the frontend bundle.
-    See Horizon-Web's docs/indigo-addjob-integration.md."""
+    """Book this manifest as a single Indigo Job — Col/Del from the manifest's
+    Start point / End point, with every HAWB stop riding along as an
+    AdditionalDrops entry — and persist the returned JobNumber against every
+    job on it. Runs server-side — Indigo's API has no CORS support, so a
+    direct browser call is blocked outright, and the account credentials
+    can't ship in the frontend bundle. See Horizon-Web's
+    docs/indigo-addjob-integration.md."""
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
@@ -525,6 +527,8 @@ async def indigo_export_manifest(
 
     missing_fields = [
         label for label, value in [
+            ("Start point", manifest.start_point),
+            ("End point", manifest.end_point),
             ("Account number", manifest.account_number),
             ("Vehicle size", manifest.vehicle_size),
         ] if not value
@@ -542,52 +546,38 @@ async def indigo_export_manifest(
     if not jobs:
         raise HTTPException(status_code=409, detail="Manifest has no jobs to export")
 
-    # Same-route jobs (same shipper + consignee) collapse into one Indigo Job
-    # — a fact about the physical run, mirroring the frontend's routeGroups.
-    all_groups = indigo_export.group_jobs_by_route(list(jobs))
+    # Same-route jobs (same shipper + consignee) collapse into one drop — a
+    # fact about the physical run, mirroring the frontend's routeGroups.
+    job_groups = indigo_export.group_jobs_by_route(list(jobs))
+    payload = indigo_export.build_indigo_addjob_payload(body.service_type, manifest, job_groups)
 
-    # Never resubmit a group that already has a real Indigo booking — a retry
-    # after a partial rejection must only touch the group(s) that failed last
-    # time, or the driver ends up with the same job booked twice in Indigo.
-    groups_to_submit = [g for g in all_groups if not any(j.indigo_job_number for j in g)]
+    if body.dry_run:
+        return IndigoExportResponse(results=[], payload=payload)
 
-    results: list[dict] = []
-    if groups_to_submit:
-        payload = indigo_export.build_indigo_addjob_payload(body.service_type, manifest, groups_to_submit)
+    try:
+        data = await indigo_export.call_indigo_addjob(payload)
+    except indigo_export.IndigoRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        try:
-            data = await indigo_export.call_indigo_addjob(payload)
-        except indigo_export.IndigoRequestError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    results = data.get("Jobs", {}).get("Job", [])
+    result = results[0] if results else {}
+    job_number = result.get("JobNumber")
 
-        results = data.get("Jobs", {}).get("Job", [])
-
-        # Client asked that Indigo's JobNumber be persisted against every HAWB —
-        # including every member of a merged group, since they were all booked
-        # as the single Indigo Job at groups_to_submit[i]. A job that's now
-        # confirmed in Indigo also gets locked here, same as the CSV /export
-        # route, so it can't be silently rewritten by an editor or an
-        # auto-applied dedup/merge update afterwards.
+    # The whole manifest is one Indigo Job now, so it's all-or-nothing: either
+    # Indigo accepts it and every HAWB on the manifest shares that one
+    # JobNumber, or it doesn't and the manifest stays 'open' to be corrected
+    # and resubmitted — there's no partial success to reconcile per-HAWB
+    # anymore.
+    if job_number:
+        result["JobNumber"] = str(job_number)
         now = datetime.now(timezone.utc)
-        for result, group in zip(results, groups_to_submit):
-            job_number = result.get("JobNumber")
-            if not job_number:
-                continue
-            result["JobNumber"] = str(job_number)
-            for job in group:
-                job.indigo_job_number = result["JobNumber"]
-                job.locked = True
-                job.status = "manifested"
-                job.manifested_at = now
-
-    # Only advance the manifest to 'exported' once every job on it — old and
-    # newly-submitted alike — has a real Indigo booking. A partial rejection
-    # (e.g. bad account number on one job) leaves the manifest 'open' so the
-    # failing job(s) can be corrected and resubmitted without re-booking the
-    # ones that already succeeded.
-    if all(j.indigo_job_number for j in jobs):
+        for job in jobs:
+            job.indigo_job_number = result["JobNumber"]
+            job.locked = True
+            job.status = "manifested"
+            job.manifested_at = now
         manifest.status = "exported"
-        manifest.exported_at = datetime.now(timezone.utc)
+        manifest.exported_at = now
 
     await db.commit()
 
