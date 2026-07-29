@@ -51,6 +51,7 @@ class HawbManifest(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    indigo_job_number: Mapped[str | None] = mapped_column(String(50))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     start_point: Mapped[str | None] = mapped_column(Text)
     end_point: Mapped[str | None] = mapped_column(Text)

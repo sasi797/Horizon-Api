@@ -578,6 +578,7 @@ async def indigo_export_manifest(
             job.manifested_at = now
         manifest.status = "exported"
         manifest.exported_at = now
+        manifest.indigo_job_number = result["JobNumber"]
 
     await db.commit()
 

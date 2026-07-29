@@ -123,6 +123,7 @@ class HawbManifestOut(BaseModel):
     total_weight_kg: float
     status: str
     exported_at: datetime | None
+    indigo_job_number: str | None
     cancelled_at: datetime | None
     start_point: str | None
     end_point: str | None
