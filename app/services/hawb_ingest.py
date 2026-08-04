@@ -87,6 +87,17 @@ async def ingest_email_batch(
     known) so nothing lands in the inbox and vanishes without a trace. Blind
     (MF-PCS) attachments are exempt from this — an unusable blind attachment
     is silently skipped, exactly as before this feature existed.
+
+    A filename that exactly matches an attachment already ingested (any prior
+    email, any outcome) is treated as a resend of the same file and never
+    extracted at all — extraction has a real cost per call, and the HAWB-number
+    dedup in `_dedupe_and_insert_jobs` only catches the waste after paying for
+    it. This still gets a manifest ("ignored", not "failed") and a document so
+    the resend isn't silently dropped and stays visible — but "ignored" (unlike
+    "failed") isn't retryable via `retry_manifest_extraction`, since a same-
+    named resend isn't a transient failure to recover from; the fix for a
+    genuinely failed extraction is Retry on the original, not resending the
+    email under the same filename.
     """
     from app.database import AsyncSessionLocal
     from app.models.hawb import HawbDocument, HawbManifest
@@ -94,22 +105,39 @@ async def ingest_email_batch(
     blind_atts = [a for a in attachments if _is_blind_filename(a.get("filename") or "")]
     non_blind_atts = [a for a in attachments if not _is_blind_filename(a.get("filename") or "")]
 
-    plain_atts: list[dict] = []
-    unprocessable_atts: list[tuple[dict, str]] = []
-    for att in non_blind_atts:
-        filename = att.get("filename") or ""
-        data = att.get("data") or b""
-        if not filename.lower().endswith(".pdf"):
-            unprocessable_atts.append((att, f"'{filename}' is not a PDF file — HAWB extraction only supports PDF attachments."))
-        elif not data:
-            unprocessable_atts.append((att, f"'{filename}' could not be retrieved from the email (no content returned)."))
-        elif len(data) > MAX_PDF_SIZE_BYTES:
-            size_mb = len(data) / (1024 * 1024)
-            unprocessable_atts.append((att, f"'{filename}' is {size_mb:.1f} MB, which exceeds the {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB maximum PDF size supported for extraction."))
-        else:
-            plain_atts.append(att)
-
     async with AsyncSessionLocal() as db:
+        # --- Duplicate-filename check: skip extraction entirely for a resend ---
+        candidate_filenames = {a.get("filename") or "" for a in attachments} - {""}
+        existing_filenames: set[str] = set()
+        if candidate_filenames:
+            result = await db.execute(select(HawbDocument.filename).where(HawbDocument.filename.in_(candidate_filenames)))
+            existing_filenames = {row[0] for row in result.all()}
+
+        duplicate_atts = [a for a in blind_atts + non_blind_atts if (a.get("filename") or "") in existing_filenames]
+        blind_atts = [a for a in blind_atts if (a.get("filename") or "") not in existing_filenames]
+        non_blind_atts = [a for a in non_blind_atts if (a.get("filename") or "") not in existing_filenames]
+
+        for att in duplicate_atts:
+            await _record_duplicate_attachment(
+                db, att, source_kind="blind" if _is_blind_filename(att.get("filename") or "") else "plain",
+                source_message_id=source_message_id, sender_email=sender_email, subject=subject, email_body=email_body,
+            )
+
+        plain_atts: list[dict] = []
+        unprocessable_atts: list[tuple[dict, str]] = []
+        for att in non_blind_atts:
+            filename = att.get("filename") or ""
+            data = att.get("data") or b""
+            if not filename.lower().endswith(".pdf"):
+                unprocessable_atts.append((att, f"'{filename}' is not a PDF file — HAWB extraction only supports PDF attachments."))
+            elif not data:
+                unprocessable_atts.append((att, f"'{filename}' could not be retrieved from the email (no content returned)."))
+            elif len(data) > MAX_PDF_SIZE_BYTES:
+                size_mb = len(data) / (1024 * 1024)
+                unprocessable_atts.append((att, f"'{filename}' is {size_mb:.1f} MB, which exceeds the {MAX_PDF_SIZE_BYTES // (1024 * 1024)} MB maximum PDF size supported for extraction."))
+            else:
+                plain_atts.append(att)
+
         # --- Unprocessable attachments: no extraction attempt, outcome already known ---
         for att, reason in unprocessable_atts:
             await _record_unprocessable_attachment(
@@ -345,6 +373,50 @@ async def _record_unprocessable_attachment(
         status="failed",
         error_message=reason,
         source_kind="plain",
+        email_body_text=email_body,
+        manifest_id=manifest.id,
+        processed_at=datetime.now(timezone.utc),
+    )
+    db.add(document)
+
+
+async def _record_duplicate_attachment(
+    db, att: dict, *, source_kind: str,
+    source_message_id: str | None, sender_email: str | None, subject: str | None, email_body: str | None,
+) -> None:
+    """An attachment whose filename exactly matches one already ingested
+    (any prior email, any outcome) — skipped before extraction ever runs, so
+    a resent PDF never pays the extraction cost twice. Still uploaded and
+    given its own manifest + document (status "ignored"/"failed") so the
+    resend stays visible instead of vanishing silently; "ignored" is
+    deliberately not "failed" so `retry_manifest_extraction` (which only
+    accepts manifest.status == "failed") refuses to retry it — see the
+    `ingest_email_batch` docstring for why a resend isn't a retry case."""
+    from app.models.hawb import HawbDocument, HawbManifest
+
+    file_bytes = att.get("data") or b""
+    filename = att.get("filename") or "attachment"
+    key = f"{settings.s3_prefix}/hawb/{source_message_id or 'manual'}/{filename}"
+    await upload_bytes(file_bytes, key, content_type="application/octet-stream")
+
+    manifest = HawbManifest(
+        job_count=0, total_weight_kg=0.0, status="ignored",
+        source_kind=source_kind, created_by=None,
+    )
+    db.add(manifest)
+    await db.flush()
+
+    document = HawbDocument(
+        source_message_id=source_message_id,
+        sender_email=sender_email,
+        subject=subject,
+        filename=filename,
+        storage_bucket=settings.s3_bucket or "horizon-dev",
+        storage_key=key,
+        job_count=0,
+        status="failed",
+        error_message=f"Duplicate filename — '{filename}' was already ingested previously, so it was not re-extracted.",
+        source_kind=source_kind,
         email_body_text=email_body,
         manifest_id=manifest.id,
         processed_at=datetime.now(timezone.utc),
