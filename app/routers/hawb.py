@@ -555,7 +555,7 @@ async def indigo_export_manifest(
         return IndigoExportResponse(results=[], payload=payload)
 
     try:
-        data = await indigo_export.call_indigo_addjob(payload)
+        data = await indigo_export.call_indigo_addjob(payload, manifest.account_number)
     except indigo_export.IndigoRequestError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

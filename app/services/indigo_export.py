@@ -155,6 +155,33 @@ def build_indigo_addjob_payload(
             "Weight": sum(float(j.weight_kg or 0) for j in group),
         })
 
+    # A collection-only manifest has nowhere for the goods to land: every stop
+    # is a pick-up and no HAWB carries a UK delivery leg, so the run has to end
+    # with one final drop-off of everything collected. That stop is the
+    # manifest's own End point, appended as drop n+1 carrying the manifest
+    # totals. A manifest that already has a delivery leg is left alone — its
+    # goods are dropped at that HAWB's own consignee.
+    if drops and all(drop["Type"] == "Collection" for drop in drops):
+        drops.append({
+            "DropNo": str(len(drops) + 1),
+            "Type": "Delivery",
+            "DateTime": "",
+            "Contact": del_contact,
+            "Company": del_split["name"],
+            "Address1": del_split["address"],
+            "Address2": "",
+            "Address3": "",
+            "Town": dele["town"],
+            "Postcode": dele["postcode"],
+            "Country": address_country(manifest.end_point),
+            "Telephone": del_phone,
+            "Insts": "",
+            "ReadyAt": "",
+            "PremisesClose": "",
+            "Packs": total_packs,
+            "Weight": total_weight,
+        })
+
     job_payload = {
         "JobGuid": uuid.uuid4().hex,
         "CustomerNumber": manifest.account_number or "",
@@ -212,11 +239,31 @@ class IndigoRequestError(Exception):
     pass
 
 
-async def call_indigo_addjob(payload: dict) -> dict:
-    token = base64.b64encode(f"{settings.INDIGO_USERNAME}:{settings.INDIGO_PASSWORD}".encode()).decode()
-    url = f"{settings.INDIGO_BASE_URL.rstrip('/')}/AddJob"
+def account_credentials(account_number: str | None) -> dict:
+    """Which NPA instance and login this manifest books against, chosen by its
+    account number (settings.INDIGO_ACCOUNTS). An unconfigured account is a hard
+    error rather than a fallback — booking a real job against whichever account
+    happened to be the default is not a mistake worth being lenient about."""
+    account = (account_number or "").strip()
+    creds = settings.INDIGO_ACCOUNTS.get(account)
+    if not creds:
+        known = ", ".join(sorted(settings.INDIGO_ACCOUNTS)) or "none"
+        raise IndigoRequestError(
+            f"No Indigo credentials are configured for account number '{account}'. "
+            f"Configured accounts: {known}."
+        )
+    return creds
 
-    logger.info("Indigo AddJob request → %s\n%s", url, json.dumps(payload, indent=2))
+
+async def call_indigo_addjob(payload: dict, account_number: str | None) -> dict:
+    creds = account_credentials(account_number)
+    token = base64.b64encode(f"{creds['username']}:{creds['password']}".encode()).decode()
+    url = f"{creds['base_url'].rstrip('/')}/AddJob"
+
+    logger.info(
+        "Indigo AddJob request (account %s) → %s\n%s",
+        account_number, url, json.dumps(payload, indent=2),
+    )
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:

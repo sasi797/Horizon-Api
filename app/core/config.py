@@ -49,11 +49,23 @@ class Settings(BaseSettings):
     GRAPH_WEBHOOK_SECRET: str = "bts-webhook-secret-change-me"
 
     # Indigo (NPA) AddJob integration — see docs/indigo-addjob-integration.md
-    # in Horizon-Web. Defaults are the SPLTEST sandbox account; override via
-    # .env with real credentials before this ever points at a live account.
-    INDIGO_BASE_URL: str = "https://apps.neilporterassociates.co.uk/iWebService/V1"
-    INDIGO_USERNAME: str = "SPLTEST"
-    INDIGO_PASSWORD: str = "SPLTest123!"
+    # in Horizon-Web. Each customer account is a separate NPA instance with its
+    # own login, so the account number picked on the manifest decides where the
+    # export is booked and as whom. Keyed by the 'account_number' dropdown value
+    # exactly as it is stored on the manifest. Override the whole map in .env
+    # with a JSON object under the same name.
+    INDIGO_ACCOUNTS: dict[str, dict[str, str]] = {
+        "SPL001": {
+            "base_url": "https://apps.neilporterassociates.co.uk/iWebService/V1",
+            "username": "SPLTEST",
+            "password": "SPLTest123!",
+        },
+        "S1102": {
+            "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
+            "username": "SPL",
+            "password": "TtOmyxHE",
+        },
+    }
 
     # Nexus has no API for us — employees are created by driving its New
     # Employee form in a headless browser (app/services/nexus_sync.py). These
