@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     INDIGO_USERNAME: str = "SPLTEST"
     INDIGO_PASSWORD: str = "SPLTest123!"
 
+    # Nexus has no API for us — employees are created by driving its New
+    # Employee form in a headless browser (app/services/nexus_sync.py). These
+    # are the login credentials that automation signs in with; set in .env.
+    NEXUS_BASE_URL: str = "https://nexus.linkworks.in"
+    NEXUS_USERNAME: str = ""
+    NEXUS_PASSWORD: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"
