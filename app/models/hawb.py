@@ -58,6 +58,7 @@ class HawbManifest(Base):
     job_reference: Mapped[str | None] = mapped_column(String(100))
     account_number: Mapped[str | None] = mapped_column(String(50))
     vehicle_size: Mapped[str | None] = mapped_column(String(30))
+    service_type: Mapped[str | None] = mapped_column(String(50))
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

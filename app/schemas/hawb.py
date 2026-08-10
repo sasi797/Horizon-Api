@@ -130,6 +130,7 @@ class HawbManifestOut(BaseModel):
     job_reference: str | None
     account_number: str | None
     vehicle_size: str | None
+    service_type: str | None
     created_by: UUID | None
     created_by_name: str | None
     source_kind: str
@@ -164,6 +165,7 @@ class ManifestUpdate(BaseModel):
     job_reference: str | None = None
     account_number: str | None = None
     vehicle_size: str | None = None
+    service_type: str | None = None
 
 
 class ManifestReorder(BaseModel):
