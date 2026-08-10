@@ -546,9 +546,26 @@ async def indigo_export_manifest(
     if not jobs:
         raise HTTPException(status_code=409, detail="Manifest has no jobs to export")
 
-    # Same-route jobs (same shipper + consignee) collapse into one drop — a
-    # fact about the physical run, mirroring the frontend's routeGroups.
-    job_groups = indigo_export.group_jobs_by_route(list(jobs))
+    # Del/Coll decides which end of a HAWB is the stop the driver actually
+    # makes, so a blank one has no address to book against — and defaulting it
+    # would silently pick a country. Rejected here rather than guessed.
+    missing_service = [
+        j.hawb_number for j in jobs if j.job_service_type not in ("collection", "delivery")
+    ]
+    if missing_service:
+        raise HTTPException(
+            status_code=409,
+            detail="Del/Coll must be set on every HAWB before export. Missing on: "
+                   + ", ".join(missing_service),
+        )
+
+    # One drop per merged stop, in the order the Merge run-order view shows
+    # them — what the user merged and reordered on the manifest is exactly what
+    # gets booked.
+    job_groups = indigo_export.group_jobs_by_merge(list(jobs))
+    conflicts = indigo_export.validate_merge_groups(job_groups)
+    if conflicts:
+        raise HTTPException(status_code=409, detail=" ".join(conflicts))
     payload = indigo_export.build_indigo_addjob_payload(body.service_type, manifest, job_groups)
 
     if body.dry_run:
