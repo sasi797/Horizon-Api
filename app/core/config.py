@@ -55,16 +55,16 @@ class Settings(BaseSettings):
     # exactly as it is stored on the manifest. Override the whole map in .env
     # with a JSON object under the same name.
     INDIGO_ACCOUNTS: dict[str, dict[str, str]] = {
-        "SPL001": {
-            "base_url": "https://apps.neilporterassociates.co.uk/iWebService/V1",
-            "username": "SPLTEST",
-            "password": "SPLTest123!",
-        },
-        "S1102": {
-            "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
-            "username": "SPL",
-            "password": "TtOmyxHE",
-        },
+        # "SPL001": {
+        #     "base_url": "https://apps.neilporterassociates.co.uk/iWebService/V1",
+        #     "username": "SPLTEST",
+        #     "password": "SPLTest123!",
+        # },
+        # "S1102": {
+        #     "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
+        #     "username": "SPL",
+        #     "password": "TtOmyxHE",
+        # },
         "PS0011": {
             "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
             "username": "SPL",
