@@ -67,8 +67,8 @@ class Settings(BaseSettings):
         },
         "PS0011": {
             "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
-            "username": "JOHNS",
-            "password": "TrPGWCUZ",
+            "username": "SPL",
+            "password": "TtOmyxHE",
         },
     }
 
