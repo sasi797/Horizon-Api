@@ -65,6 +65,11 @@ class Settings(BaseSettings):
             "username": "SPL",
             "password": "TtOmyxHE",
         },
+        "PS0011": {
+            "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
+            "username": "JOHNS",
+            "password": "TrPGWCUZ",
+        },
     }
 
     # Nexus has no API for us — employees are created by driving its New
