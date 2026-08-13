@@ -304,9 +304,10 @@ async def get_manifest(
     if not jobs:
         # A manifest with zero jobs is a real data bug for any settled status —
         # but for a placeholder still extracting (or one that failed / had
-        # nothing new to manifest), it's expected: locate its source document
-        # via the reverse link instead of jobs[0].document.
-        if manifest.status not in ("extracting", "failed"):
+        # nothing new to manifest, or was ignored before extraction ever ran),
+        # it's expected: locate its source document via the reverse link
+        # instead of jobs[0].document.
+        if manifest.status not in ("extracting", "failed", "ignored"):
             raise HTTPException(status_code=404, detail="Manifest has no jobs")
         document = await db.scalar(select(HawbDocument).where(HawbDocument.manifest_id == manifest_id))
         if not document:

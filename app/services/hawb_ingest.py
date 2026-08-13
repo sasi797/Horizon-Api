@@ -81,12 +81,16 @@ async def ingest_email_batch(
     keep getting a manifest created after the fact, only if unmatched jobs
     land on them, exactly as before this feature existed.
 
-    A non-blind attachment that can never be extracted — not a PDF, empty
-    content, or too large for Anthropic's API — still gets a manifest (status
-    "failed" immediately, no "extracting" step, since the outcome is already
-    known) so nothing lands in the inbox and vanishes without a trace. Blind
-    (MF-PCS) attachments are exempt from this — an unusable blind attachment
-    is silently skipped, exactly as before this feature existed.
+    Only PDFs are accepted. A non-PDF attachment (JPEG, signature image, …) is
+    dropped here and produces nothing at all — no document, no manifest, no row
+    on the manifests screen.
+
+    A non-blind PDF that can't be extracted as it stands — empty content, or
+    too large for Anthropic's API — does still get a manifest immediately
+    (status "failed", no "extracting" step, since the outcome is already known)
+    so a real PDF never lands in the inbox and vanishes without a trace. Blind
+    (MF-PCS) attachments are exempt from this — an unusable blind attachment is
+    silently skipped, exactly as before this feature existed.
 
     A filename that exactly matches an attachment already ingested (any prior
     email, any outcome) is treated as a resend of the same file and never
@@ -129,8 +133,13 @@ async def ingest_email_batch(
             filename = att.get("filename") or ""
             data = att.get("data") or b""
             if not filename.lower().endswith(".pdf"):
-                unprocessable_atts.append((att, f"'{filename}' is not a PDF file — HAWB extraction only supports PDF attachments."))
-            elif not data:
+                # Only PDFs are accepted. A non-PDF (JPEG, signature image,
+                # DOCX, …) is dropped outright — no document, no manifest,
+                # nothing on the manifests screen. It's not a failure anyone
+                # can act on, and a row per stray image attachment is noise.
+                logger.info("HAWB: skipping non-PDF attachment %r", filename)
+                continue
+            if not data:
                 unprocessable_atts.append((att, f"'{filename}' could not be retrieved from the email (no content returned)."))
             elif len(data) > MAX_PDF_SIZE_BYTES:
                 size_mb = len(data) / (1024 * 1024)
@@ -138,7 +147,7 @@ async def ingest_email_batch(
             else:
                 plain_atts.append(att)
 
-        # --- Unprocessable attachments: no extraction attempt, outcome already known ---
+        # --- Unprocessable PDFs: no extraction attempt, outcome already known ---
         for att, reason in unprocessable_atts:
             await _record_unprocessable_attachment(
                 db, att, reason,
@@ -344,10 +353,14 @@ async def _record_unprocessable_attachment(
     db, att: dict, reason: str, *,
     source_message_id: str | None, sender_email: str | None, subject: str | None, email_body: str | None,
 ) -> None:
-    """A non-blind attachment that can never be extracted (wrong file type, no
-    content, too large) — no extraction attempt is made since the outcome is
-    already known, so this skips straight to a failed manifest + document
-    instead of going through the extracting-first two-phase commit."""
+    """A non-blind PDF that can't be extracted as it stands (empty download,
+    too large) — no extraction attempt is made since the outcome is already
+    known, so this skips straight to a failed manifest + document instead of
+    going through the extracting-first two-phase commit. "failed" keeps it
+    retryable, which is right here: both causes can clear on a retry.
+
+    Non-PDFs never reach this function — they're dropped in `ingest_email_batch`
+    without a document or manifest, since only PDFs are accepted."""
     from app.models.hawb import HawbDocument, HawbManifest
 
     file_bytes = att.get("data") or b""
