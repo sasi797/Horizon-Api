@@ -567,7 +567,9 @@ async def indigo_export_manifest(
     conflicts = indigo_export.validate_merge_groups(job_groups)
     if conflicts:
         raise HTTPException(status_code=409, detail=" ".join(conflicts))
-    payload = indigo_export.build_indigo_addjob_payload(body.service_type, manifest, job_groups)
+    payload = indigo_export.build_indigo_addjob_payload(
+        body.service_type, manifest, [group for _, group in job_groups]
+    )
 
     if body.dry_run:
         return IndigoExportResponse(results=[], payload=payload)

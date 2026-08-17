@@ -117,7 +117,7 @@ def _contact_key(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
 
 
-def group_jobs_by_merge(jobs: list[HawbJob]) -> list[list[HawbJob]]:
+def group_jobs_by_merge(jobs: list[HawbJob]) -> list[tuple[str, list[HawbJob]]]:
     """The manifest's merged stops, exactly as the "Merge" run-order view shows
     them: one group per row on screen, in the same order (`jobs` arrives ordered
     by manifest_sequence, and groups come out ordered by first member). What the
@@ -133,9 +133,23 @@ def group_jobs_by_merge(jobs: list[HawbJob]) -> list[list[HawbJob]]:
     Note this groups on the paperwork, not on geography: it keys on the "To"
     without regard to which end of the route the driver actually visits, so a
     group's members can disagree about where the stop is. `validate_merge_groups`
-    rejects those before they reach Indigo."""
+    rejects those before they reach Indigo.
+
+    A job with manual_group_id set (merged or force-standalone by hand on the
+    manifest page) is fully excluded from the to:/contact: heuristic below —
+    it neither contributes to a bucket nor can be pulled into one — and is
+    grouped purely on manual_group_id instead. That keeps a manual override
+    from dragging unrelated jobs into its bucket, and keeps unmerging one job
+    from breaking the auto-grouping of the group's other members.
+
+    Each group ships tagged with its merge kind ("to", "contact", "manual",
+    or "single") so `validate_merge_groups` can tell a contact-tier merge
+    (address mismatch expected to be rare and forgivable — see there) from a
+    to-tier one (address mismatch is a real routing danger, always rejected)."""
+    auto_jobs = [job for job in jobs if not job.manual_group_id]
+
     to_buckets: dict[str, list[HawbJob]] = {}
-    for job in jobs:
+    for job in auto_jobs:
         identity = address_identity_key(job.consignee)
         if identity:
             to_buckets.setdefault(identity, []).append(job)
@@ -148,7 +162,7 @@ def group_jobs_by_merge(jobs: list[HawbJob]) -> list[list[HawbJob]]:
             key_for_job[job.id] = f"to:{identity}"
 
     contact_buckets: dict[str, list[HawbJob]] = {}
-    for job in jobs:
+    for job in auto_jobs:
         if job.id in key_for_job:
             continue
         contact = _contact_key(job.shipper_contact)
@@ -162,23 +176,33 @@ def group_jobs_by_merge(jobs: list[HawbJob]) -> list[list[HawbJob]]:
 
     groups: dict[str, list[HawbJob]] = {}
     for job in jobs:
-        groups.setdefault(key_for_job.get(job.id) or f"single:{job.id}", []).append(job)
-    return list(groups.values())
+        key = f"manual:{job.manual_group_id}" if job.manual_group_id else (key_for_job.get(job.id) or f"single:{job.id}")
+        groups.setdefault(key, []).append(job)
+    return [(key.split(":", 1)[0], group) for key, group in groups.items()]
 
 
-def validate_merge_groups(job_groups: list[list[HawbJob]]) -> list[str]:
+def validate_merge_groups(job_groups: list[tuple[str, list[HawbJob]]]) -> list[str]:
     """Every HAWB merged into one drop has to send the driver to one place, so a
-    group is only bookable when its members agree on both the Del/Coll leg and
-    the address that leg stops at.
+    group is only bookable when its members agree on the Del/Coll leg — and,
+    unless it's a contact-tier merge, on the address that leg stops at too.
 
-    Neither is guaranteed by the merge rule itself: it keys on the "To", so a
-    group whose members are collections is keyed on an address nobody visits,
-    and its pickups can sit in different countries. Left unchecked the drop
-    silently takes whichever HAWB sorted first and the rest vanish from the
-    payload — a driver sent to California for a run out of St. Mary's. Returns
-    one plain-language problem per unbookable group."""
+    Address agreement isn't guaranteed by the merge rule itself: the to-tier
+    keys on the "To", so a group whose members are collections is keyed on an
+    address nobody visits, and its pickups can sit in different countries.
+    Left unchecked the drop silently takes whichever HAWB sorted first and the
+    rest vanish from the payload — a driver sent to California for a run out
+    of St. Mary's. That's always rejected.
+
+    A contact-tier merge is different: it's keyed on a named shipper contact
+    on the assumption that the same person implies the same building, which
+    mostly holds — the rare exception is a contact who legitimately serves a
+    couple of sub-locations (e.g. a hospital's main site vs. its reception
+    desk). Rejecting the whole export over that rare case is worse than the
+    fix, so those groups are allowed through and `build_indigo_addjob_payload`
+    books the first member's address for all of them. Returns one
+    plain-language problem per unbookable group."""
     problems: list[str] = []
-    for group in job_groups:
+    for kind, group in job_groups:
         if len(group) < 2:
             continue
         hawbs = ", ".join(j.hawb_number for j in group)
@@ -187,6 +211,8 @@ def validate_merge_groups(job_groups: list[list[HawbJob]]) -> list[str]:
                 f"{hawbs} are merged into one stop but have different Del/Coll "
                 "services — a merged stop is a single visit, so they must match."
             )
+            continue
+        if kind == "contact":
             continue
         if len({address_identity_key(stop_address(j)) for j in group}) > 1:
             places = " / ".join(dict.fromkeys(
@@ -242,9 +268,11 @@ def build_indigo_addjob_payload(
     for drop_no, group in enumerate(job_groups, start=1):
         job = group[0]
         is_collection = job.job_service_type == "collection"
-        # Reading the leg and the address off the first member is shorthand, not
-        # a pick between disagreeing values: validate_merge_groups has already
-        # rejected any group whose members differ on either.
+        # Reading the leg and the address off the first member is shorthand
+        # for a to-tier or manual group, where validate_merge_groups has
+        # already rejected any group whose members differ on either. For a
+        # contact-tier group it's a real choice: members may genuinely
+        # disagree on address, and the first one booked wins for the group.
         address = job.shipper if is_collection else job.consignee
         addr_split = split_address(address)
         addr_line = city_and_postcode_line(address)

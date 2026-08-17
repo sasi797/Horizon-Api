@@ -44,6 +44,7 @@ class HawbJobOut(BaseModel):
     status: str
     manifest_id: UUID | None
     manifest_sequence: int | None
+    manual_group_id: str | None
     locked: bool
     ready_at: datetime | None
     manifested_at: datetime | None
@@ -97,6 +98,7 @@ class HawbJobUpdate(BaseModel):
     special_handling: str | None = None
     job_service_type: str | None = None
     indigo_job_number: str | None = None
+    manual_group_id: str | None = None
 
     @field_validator("collection_at", "delivery_at")
     @classmethod

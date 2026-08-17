@@ -109,6 +109,7 @@ class HawbJob(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending_review")
     manifest_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_manifests.id", ondelete="SET NULL"))
     manifest_sequence: Mapped[int | None] = mapped_column(Integer)
+    manual_group_id: Mapped[str | None] = mapped_column(String(64))
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     manifested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
