@@ -9,7 +9,6 @@ from app.schemas.account_code import AccountCodeOut
 
 router = APIRouter(prefix="/account-codes", tags=["account-codes"])
 
-
 @router.get("", response_model=list[AccountCodeOut])
 async def list_account_codes(
     q: str | None = Query(default=None, description="Search by code, name or site"),
