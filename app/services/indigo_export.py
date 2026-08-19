@@ -227,6 +227,17 @@ def validate_merge_groups(job_groups: list[tuple[str, list[HawbJob]]]) -> list[s
     return problems
 
 
+def is_backhaul_collection(job: HawbJob, manifest: HawbManifest) -> bool:
+    """A collection whose pickup site is the same place as the manifest's End
+    point isn't a real extra stop — the vehicle is already headed there as the
+    run's last stop, so booking it again as its own AdditionalDrops entry
+    would double up a visit Indigo doesn't need to be told about separately."""
+    if job.job_service_type != "collection":
+        return False
+    identity = address_identity_key(job.shipper)
+    return identity is not None and identity == address_identity_key(manifest.end_point)
+
+
 def _matching_contact(address: str | None, jobs: list[HawbJob]) -> tuple[str, str]:
     """Start point / End point are picked from one of this manifest's own HAWB
     addresses (the exact same text as that job's shipper/consignee) — so the
@@ -265,7 +276,17 @@ def build_indigo_addjob_payload(
     del_contact, del_phone = _matching_contact(manifest.end_point, all_jobs)
 
     drops = []
-    for drop_no, group in enumerate(job_groups, start=1):
+    drop_no = 0
+    for group in job_groups:
+        # A merged stop is one physical visit — if every HAWB in it is a
+        # backhaul collection at the End point, the whole stop is skipped from
+        # export. A group that mixes a backhaul row with a real one still
+        # books normally: the real row still needs its own drop, and merge
+        # grouping isn't touched here (that's a run-order concern, not an
+        # export one).
+        if all(is_backhaul_collection(j, manifest) for j in group):
+            continue
+        drop_no += 1
         job = group[0]
         is_collection = job.job_service_type == "collection"
         # Reading the leg and the address off the first member is shorthand
