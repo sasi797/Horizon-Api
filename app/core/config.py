@@ -48,27 +48,37 @@ class Settings(BaseSettings):
     # Random secret string — Graph echoes it back in every notification so we can verify it's genuine
     GRAPH_WEBHOOK_SECRET: str = "bts-webhook-secret-change-me"
 
+    # mytransport.co.uk order_import integration — see
+    # docs/mytransport-export-integration.md in Horizon-Web. One login for
+    # the whole company (unlike Indigo, there's no per-account instance);
+    # productno/customerno are fixed per the payload the client tested in
+    # Postman — update these if that mapping ever changes.
+    MYTRANSPORT_BASE_URL: str = "https://www.mytransport.co.uk/horizon-express/import_json.php"
+    MYTRANSPORT_USERNAME: str = "john.southwell@horizon-express.co.uk"
+    MYTRANSPORT_PASSWORD: str = "8xK3c6qp"
+    MYTRANSPORT_PRODUCTNO: int = 1
+    MYTRANSPORT_CUSTOMERNO: int = 1
+
     # Indigo (NPA) AddJob integration — see docs/indigo-addjob-integration.md
-    # in Horizon-Web. Each customer account is a separate NPA instance with its
-    # own login, so the account number picked on the manifest decides where the
-    # export is booked and as whom. Keyed by the 'account_number' dropdown value
-    # exactly as it is stored on the manifest. Override the whole map in .env
-    # with a JSON object under the same name.
+    # in Horizon-Web. Runs alongside mytransport on every Export manifest
+    # click, not instead of it. Each customer account is a separate NPA
+    # instance with its own login, so the account number picked on the
+    # manifest decides where the export is booked and as whom. Keyed by the
+    # 'account_number' dropdown value exactly as it is stored on the
+    # manifest. Override the whole map in .env with a JSON object under the
+    # same name.
     INDIGO_ACCOUNTS: dict[str, dict[str, str]] = {
-        # "SPL001": {
-        #     "base_url": "https://apps.neilporterassociates.co.uk/iWebService/V1",
-        #     "username": "SPLTEST",
-        #     "password": "SPLTest123!",
-        # },
-        # "S1102": {
-        #     "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
-        #     "username": "SPL",
-        #     "password": "TtOmyxHE",
-        # },
         "PS0011": {
             "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
             "username": "SPL",
             "password": "TtOmyxHE",
+        },
+        # Dev/test sandbox account (client-provided) — same NPA test instance
+        # used before the export switch to EasyTrans, still live for testing.
+        "SPL001": {
+            "base_url": "https://apps.neilporterassociates.co.uk/iWebService/V1",
+            "username": "SPLTEST",
+            "password": "SPLTest123!",
         },
     }
 

@@ -35,7 +35,6 @@ class HawbJobOut(BaseModel):
     direction: str | None
     special_handling: str | None
     job_service_type: str | None
-    indigo_job_number: str | None
     packages: list[dict]
     extracted_data: dict
     source_kind: str
@@ -97,7 +96,6 @@ class HawbJobUpdate(BaseModel):
     direction: str | None = None
     special_handling: str | None = None
     job_service_type: str | None = None
-    indigo_job_number: str | None = None
     manual_group_id: str | None = None
 
     @field_validator("collection_at", "delivery_at")
@@ -125,14 +123,21 @@ class HawbManifestOut(BaseModel):
     total_weight_kg: float
     status: str
     exported_at: datetime | None
-    indigo_job_number: str | None
     cancelled_at: datetime | None
     start_point: str | None
     end_point: str | None
+    skip_end_destination: bool
     job_reference: str | None
     account_number: str | None
     vehicle_size: str | None
     service_type: str | None
+    indigo_job_number: str | None
+    indigo_export_status: str | None
+    indigo_export_error: str | None
+    mytransport_order_no: str | None
+    mytransport_tracking_url: str | None
+    mytransport_export_status: str | None
+    mytransport_export_error: str | None
     created_by: UUID | None
     created_by_name: str | None
     source_kind: str
@@ -164,6 +169,7 @@ class HawbJobPendingUpdateOut(BaseModel):
 class ManifestUpdate(BaseModel):
     start_point: str | None = None
     end_point: str | None = None
+    skip_end_destination: bool | None = None
     job_reference: str | None = None
     account_number: str | None = None
     vehicle_size: str | None = None
@@ -174,24 +180,25 @@ class ManifestReorder(BaseModel):
     job_ids: list[UUID]
 
 
-class IndigoExportRequest(BaseModel):
-    # Not persisted anywhere yet (see docs/indigo-addjob-integration.md —
-    # "ServiceType is the one remaining local-only value"), so the frontend
-    # sends whatever's currently selected in the UI on each export.
-    service_type: str
-    # When true, builds and returns the AddJob payload without calling Indigo
-    # or touching the DB — lets the payload be inspected before it's live.
+class ExportManifestRequest(BaseModel):
+    # When true, builds and returns both systems' payloads without calling
+    # either API or touching the DB — lets the payloads be inspected before
+    # they're live.
     dry_run: bool = False
 
 
-class IndigoJobResult(BaseModel):
-    JobGuid: str | None = None
-    JobNumber: str | None = None
-    JobReference: str | None = None
-    ErrorCode: str | int | None = None
-    Errormessage: str | None = None
+class ExportSystemResult(BaseModel):
+    # 'booked' / 'failed' / 'skipped' (dry_run only — payload built, nothing
+    # called). Never 'booked' twice for the same system: a retry after a
+    # partial failure echoes back the already-booked system's own prior
+    # result instead of re-calling it.
+    status: str
+    reference: str | None = None
+    tracking_url: str | None = None
+    error: str | None = None
 
 
-class IndigoExportResponse(BaseModel):
-    results: list[IndigoJobResult]
-    payload: dict | None = None
+class ExportManifestResponse(BaseModel):
+    indigo: ExportSystemResult
+    mytransport: ExportSystemResult
+    payloads: dict | None = None

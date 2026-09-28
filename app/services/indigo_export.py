@@ -227,6 +227,22 @@ def validate_merge_groups(job_groups: list[tuple[str, list[HawbJob]]]) -> list[s
     return problems
 
 
+def resolve_end_point(manifest: HawbManifest) -> str | None:
+    """The route's actual closing address — an explicit End point wins;
+    otherwise, unless the dispatcher checked "Don't add End point as a
+    destination" (skip_end_destination), the run closes the loop back at
+    Start point, same as Horizon-Web's Run order preview defaults it
+    (`effectiveEndPoint` / `endMatchesStart`, default on) before an End point
+    is ever picked. Booking has to agree with what that preview already
+    showed the dispatcher, or the stop count silently drops between the
+    screen and the carrier."""
+    if manifest.end_point:
+        return manifest.end_point
+    if manifest.skip_end_destination:
+        return None
+    return manifest.start_point
+
+
 def is_backhaul_collection(job: HawbJob, manifest: HawbManifest) -> bool:
     """A collection whose pickup site is the same place as the manifest's End
     point isn't a real extra stop — the vehicle is already headed there as the
@@ -235,7 +251,7 @@ def is_backhaul_collection(job: HawbJob, manifest: HawbManifest) -> bool:
     if job.job_service_type != "collection":
         return False
     identity = address_identity_key(job.shipper)
-    return identity is not None and identity == address_identity_key(manifest.end_point)
+    return identity is not None and identity == address_identity_key(resolve_end_point(manifest))
 
 
 def _matching_contact(address: str | None, jobs: list[HawbJob]) -> tuple[str, str]:
@@ -263,17 +279,18 @@ def build_indigo_addjob_payload(
     and every HAWB stop in between — one per group from `group_jobs_by_merge` —
     rides along as an AdditionalDrops entry, Collection or Delivery per that
     group's shared job_service_type."""
+    end_point = resolve_end_point(manifest)
     col = city_and_postcode_line(manifest.start_point)
-    dele = city_and_postcode_line(manifest.end_point)
+    dele = city_and_postcode_line(end_point)
     col_split = split_address(manifest.start_point)
-    del_split = split_address(manifest.end_point)
+    del_split = split_address(end_point)
 
     all_jobs = [job for group in job_groups for job in group]
     total_packs = sum(j.package_qty or 0 for j in all_jobs)
     total_weight = sum(float(j.weight_kg or 0) for j in all_jobs)
     special_insts = " — ".join(dict.fromkeys(j.special_handling for j in all_jobs if j.special_handling))
     col_contact, col_phone = _matching_contact(manifest.start_point, all_jobs)
-    del_contact, del_phone = _matching_contact(manifest.end_point, all_jobs)
+    del_contact, del_phone = _matching_contact(end_point, all_jobs)
 
     drops = []
     drop_no = 0
@@ -353,7 +370,7 @@ def build_indigo_addjob_payload(
         "DelAddress3": "",
         "DelTown": dele["town"],
         "DelPostcode": dele["postcode"],
-        "DelCountry": address_country(manifest.end_point),
+        "DelCountry": address_country(end_point),
         "DelTelephone": del_phone,
         "DelInsts": "",
         "DelReadyAt": "",

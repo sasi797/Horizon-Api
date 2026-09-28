@@ -1,5 +1,7 @@
+import asyncio
 import csv
 import io
+import json
 import math
 from datetime import datetime, timezone
 from uuid import UUID
@@ -13,10 +15,11 @@ from app.dependencies import get_current_user, get_db
 from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbManifest
 from app.models.user import User
 from app.schemas.hawb import (
+    ExportManifestRequest, ExportManifestResponse, ExportSystemResult,
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
-    HawbManifestDetailOut, HawbManifestOut, IndigoExportRequest, IndigoExportResponse, ManifestReorder, ManifestUpdate,
+    HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
 )
-from app.services import indigo_export
+from app.services import indigo_export, mytransport_export
 from app.services.hawb_ingest import _parse_dt, retry_document_extraction
 from app.storage import presigned_url
 
@@ -504,41 +507,80 @@ async def export_manifest(
     )
 
 
-@router.post("/manifests/{manifest_id}/indigo-export", response_model=IndigoExportResponse)
-async def indigo_export_manifest(
+async def _run_indigo_export(
+    manifest: HawbManifest, payload: dict, already_booked: bool,
+) -> ExportSystemResult:
+    if already_booked:
+        return ExportSystemResult(status="booked", reference=manifest.indigo_job_number)
+    try:
+        data = await indigo_export.call_indigo_addjob(payload, manifest.account_number)
+    except indigo_export.IndigoRequestError as exc:
+        return ExportSystemResult(status="failed", error=str(exc))
+    # The whole manifest is one Indigo Job, so this is all-or-nothing per
+    # system: either Indigo returns a JobNumber for it, or it doesn't and
+    # this system's leg is 'failed' (independent of how mytransport does).
+    results = data.get("Jobs", {}).get("Job", [])
+    result = results[0] if results else {}
+    job_number = result.get("JobNumber")
+    if job_number:
+        return ExportSystemResult(status="booked", reference=str(job_number))
+    return ExportSystemResult(
+        status="failed",
+        error=result.get("Errormessage") or f"Indigo rejected the job: {json.dumps(result)[:500]}",
+    )
+
+
+async def _run_mytransport_export(
+    manifest: HawbManifest, payload: dict, already_booked: bool,
+) -> ExportSystemResult:
+    if already_booked:
+        return ExportSystemResult(
+            status="booked", reference=manifest.mytransport_order_no,
+            tracking_url=manifest.mytransport_tracking_url,
+        )
+    try:
+        data = await mytransport_export.call_mytransport_import(payload)
+    except mytransport_export.MytransportRequestError as exc:
+        return ExportSystemResult(status="failed", error=str(exc))
+    if not mytransport_export.is_success_response(data):
+        return ExportSystemResult(status="failed", error=f"mytransport rejected the order: {json.dumps(data)[:500]}")
+    result = data.get("result", {})
+    order_nos = result.get("new_ordernos") or []
+    order_no = str(order_nos[0]) if order_nos else None
+    tracktrace = result.get("order_tracktrace") or {}
+    tracking_url = tracktrace.get(order_no, {}).get("local_tracktrace_url") if order_no else None
+    return ExportSystemResult(status="booked", reference=order_no, tracking_url=tracking_url)
+
+
+@router.post("/manifests/{manifest_id}/carrier-export", response_model=ExportManifestResponse)
+async def export_manifest_dual(
     manifest_id: UUID,
-    body: IndigoExportRequest,
+    body: ExportManifestRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Book this manifest as a single Indigo Job — Col/Del from the manifest's
-    Start point / End point, with every HAWB stop riding along as an
-    AdditionalDrops entry — and persist the returned JobNumber against every
-    job on it. Runs server-side — Indigo's API has no CORS support, so a
-    direct browser call is blocked outright, and the account credentials
-    can't ship in the frontend bundle. See Horizon-Web's
-    docs/indigo-addjob-integration.md."""
+    """Book this manifest into Indigo and mytransport/EasyTrans at once, both
+    fired concurrently — the manifest's Start point is the pickup, with every
+    HAWB stop riding along as its own drop/destination entry in each system's
+    own shape. Runs server-side so neither system's login ever ships in the
+    frontend bundle. Each system's outcome is tracked independently
+    (indigo_export_status / mytransport_export_status): the manifest locks as
+    soon as either books successfully, and a manifest with one system still
+    'failed' can be re-posted here to retry only that one — the system that
+    already booked is echoed back, never called twice. See Horizon-Web's
+    docs/indigo-addjob-integration.md and docs/mytransport-export-integration.md."""
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
-    if manifest.status != "open":
+    if manifest.status not in ("open", "exported"):
         raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not open")
-    if manifest.exported_at is not None:
-        raise HTTPException(status_code=409, detail="Manifest has already been exported")
+    indigo_already_booked = manifest.indigo_export_status == "booked"
+    mytransport_already_booked = manifest.mytransport_export_status == "booked"
+    if manifest.status == "exported" and indigo_already_booked and mytransport_already_booked:
+        raise HTTPException(status_code=409, detail="Manifest has already been exported to both Indigo and EasyTrans")
 
-    missing_fields = [
-        label for label, value in [
-            ("Start point", manifest.start_point),
-            ("End point", manifest.end_point),
-            ("Account number", manifest.account_number),
-            ("Vehicle size", manifest.vehicle_size),
-        ] if not value
-    ]
-    if missing_fields:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Missing required fields before export: {', '.join(missing_fields)}",
-        )
+    if not manifest.start_point:
+        raise HTTPException(status_code=409, detail="Missing required field before export: Start point")
 
     jobs_result = await db.execute(
         select(HawbJob).where(HawbJob.manifest_id == manifest_id).order_by(HawbJob.manifest_sequence)
@@ -560,49 +602,78 @@ async def indigo_export_manifest(
                    + ", ".join(missing_service),
         )
 
-    # One drop per merged stop, in the order the Merge run-order view shows
-    # them — what the user merged and reordered on the manifest is exactly what
-    # gets booked.
-    job_groups = indigo_export.group_jobs_by_merge(list(jobs))
-    conflicts = indigo_export.validate_merge_groups(job_groups)
+    # One destination/drop per merged stop, in the order the Merge run-order
+    # view shows them — what the user merged and reordered on the manifest is
+    # exactly what gets booked, in both systems.
+    job_groups = mytransport_export.group_jobs_by_merge(list(jobs))
+    conflicts = mytransport_export.validate_merge_groups(job_groups)
     if conflicts:
         raise HTTPException(status_code=409, detail=" ".join(conflicts))
-    payload = indigo_export.build_indigo_addjob_payload(
-        body.service_type, manifest, [group for _, group in job_groups]
-    )
+    groups_only = [group for _, group in job_groups]
+    mytransport_payload = mytransport_export.build_mytransport_order_payload(manifest, groups_only)
+    indigo_payload = indigo_export.build_indigo_addjob_payload(manifest.service_type or "", manifest, groups_only)
+
+    # mytransport requires at least one real stop besides the guaranteed
+    # Start point (and the End point, when build_mytransport_order_payload is
+    # booking it as its own closing destination too) — fewer means every job
+    # group was skipped as a backhaul collection, confirmed live (errorno 30,
+    # "A minimum of two destinations... is required") that EasyTrans rejects
+    # a route with nothing real on it. Indigo has no equivalent minimum.
+    closes_at_end_point = bool(mytransport_export.resolve_end_point(manifest))
+    real_stop_count = len(mytransport_payload["orders"][0]["order_destinations"]) - 1 - (1 if closes_at_end_point else 0)
+    if real_stop_count < 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Every HAWB on this manifest is a backhaul collection at the End point — "
+                   "there's no real stop left to export.",
+        )
 
     if body.dry_run:
-        return IndigoExportResponse(results=[], payload=payload)
+        # Unlike Indigo (auth in a header), mytransport's login travels inside
+        # the body itself — redact it before handing the payload back to
+        # whichever authenticated staff member happened to call dry_run.
+        redacted_mytransport = {
+            **mytransport_payload,
+            "authentication": {**mytransport_payload["authentication"], "password": "***"},
+        }
+        return ExportManifestResponse(
+            indigo=ExportSystemResult(status="skipped"),
+            mytransport=ExportSystemResult(status="skipped"),
+            payloads={"indigo": indigo_payload, "mytransport": redacted_mytransport},
+        )
 
-    try:
-        data = await indigo_export.call_indigo_addjob(payload, manifest.account_number)
-    except indigo_export.IndigoRequestError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    indigo_result, mytransport_result = await asyncio.gather(
+        _run_indigo_export(manifest, indigo_payload, indigo_already_booked),
+        _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked),
+    )
 
-    results = data.get("Jobs", {}).get("Job", [])
-    result = results[0] if results else {}
-    job_number = result.get("JobNumber")
+    if indigo_result.status == "booked":
+        manifest.indigo_job_number = indigo_result.reference
+    manifest.indigo_export_status = indigo_result.status
+    manifest.indigo_export_error = indigo_result.error
 
-    # The whole manifest is one Indigo Job now, so it's all-or-nothing: either
-    # Indigo accepts it and every HAWB on the manifest shares that one
-    # JobNumber, or it doesn't and the manifest stays 'open' to be corrected
-    # and resubmitted — there's no partial success to reconcile per-HAWB
-    # anymore.
-    if job_number:
-        result["JobNumber"] = str(job_number)
+    if mytransport_result.status == "booked":
+        manifest.mytransport_order_no = mytransport_result.reference
+        manifest.mytransport_tracking_url = mytransport_result.tracking_url
+    manifest.mytransport_export_status = mytransport_result.status
+    manifest.mytransport_export_error = mytransport_result.error
+
+    # The manifest locks as soon as either system has booked it — that leg is
+    # live and can't be un-booked by leaving the manifest editable. A system
+    # that's still 'failed' stays retryable (see already_booked above) without
+    # touching the one that already went through.
+    if (indigo_result.status == "booked" or mytransport_result.status == "booked") and manifest.status != "exported":
         now = datetime.now(timezone.utc)
         for job in jobs:
-            job.indigo_job_number = result["JobNumber"]
             job.locked = True
             job.status = "manifested"
             job.manifested_at = now
         manifest.status = "exported"
         manifest.exported_at = now
-        manifest.indigo_job_number = result["JobNumber"]
 
     await db.commit()
 
-    return IndigoExportResponse(results=results)
+    return ExportManifestResponse(indigo=indigo_result, mytransport=mytransport_result)
 
 
 @router.post("/manifests/{manifest_id}/cancel", response_model=HawbManifestOut)

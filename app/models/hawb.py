@@ -51,14 +51,30 @@ class HawbManifest(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    indigo_job_number: Mapped[str | None] = mapped_column(String(50))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     start_point: Mapped[str | None] = mapped_column(Text)
     end_point: Mapped[str | None] = mapped_column(Text)
+    # Export always books the End point as the route's final destination —
+    # this is the escape hatch for the rare manifest that genuinely has
+    # nowhere to close the loop. See mytransport_export.build_mytransport_order_payload.
+    skip_end_destination: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     job_reference: Mapped[str | None] = mapped_column(String(100))
     account_number: Mapped[str | None] = mapped_column(String(50))
     vehicle_size: Mapped[str | None] = mapped_column(String(30))
     service_type: Mapped[str | None] = mapped_column(String(50))
+    # Export now books this manifest into Indigo and mytransport/EasyTrans
+    # independently and concurrently — one can succeed while the other fails
+    # (and gets retried on its own without re-booking the one that already
+    # went through), so each system's outcome is tracked separately rather
+    # than folded into the single manifest-wide `status`/`exported_at`.
+    # *_status is 'booked' / 'failed' / None (never attempted).
+    indigo_job_number: Mapped[str | None] = mapped_column(String(50))
+    indigo_export_status: Mapped[str | None] = mapped_column(String(20))
+    indigo_export_error: Mapped[str | None] = mapped_column(Text)
+    mytransport_order_no: Mapped[str | None] = mapped_column(String(50))
+    mytransport_tracking_url: Mapped[str | None] = mapped_column(Text)
+    mytransport_export_status: Mapped[str | None] = mapped_column(String(20))
+    mytransport_export_error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -102,7 +118,6 @@ class HawbJob(Base):
     direction: Mapped[str | None] = mapped_column(String(20))
     special_handling: Mapped[str | None] = mapped_column(Text)
     job_service_type: Mapped[str | None] = mapped_column(String(30))
-    indigo_job_number: Mapped[str | None] = mapped_column(String(50))
     packages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     extracted_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     source_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="plain")
