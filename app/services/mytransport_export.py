@@ -395,6 +395,28 @@ def _matching_contact(address: str | None, jobs: list[HawbJob]) -> tuple[str, st
     return "", ""
 
 
+def _package_line(group: list[HawbJob], waybillno: str, deliver_destinationno: int) -> dict:
+    """One order_packages entry for a Delivery-leg group's goods. The goods
+    description belongs here, not the HAWB number — that moved to the
+    destination's own waybillno once the field existed. Falls back to the
+    HAWB numbers only if extraction never captured a package content
+    description."""
+    representative = group[0]
+    length, width, height = _parse_dimensions(representative.dimensions)
+    contents = ", ".join(dict.fromkeys(
+        p.get("content_description") for p in (representative.packages or []) if p.get("content_description")
+    ))
+    return {
+        "deliver_destinationno": deliver_destinationno,
+        "amount": sum(j.package_qty or 0 for j in group),
+        "weight": sum(float(j.weight_kg or 0) for j in group),
+        "length": length,
+        "width": width,
+        "height": height,
+        "description": contents or waybillno,
+    }
+
+
 def _destination(
     address: str | None,
     collect_deliver: int,
@@ -473,6 +495,37 @@ def _collapse_same_stop_groups(
     return collapsed
 
 
+def _stop_record(group: list[HawbJob]) -> dict:
+    job = group[0]
+    is_collection = job.job_service_type == "collection"
+    # Reading the leg and the address off the first member is shorthand
+    # for a to-tier or manual group, where validate_merge_groups has
+    # already rejected any group whose members differ on either. For a
+    # contact-tier group it's a real choice: members may genuinely
+    # disagree on address, and the first one booked wins for the group.
+    address = job.shipper if is_collection else job.consignee
+    contact = (job.shipper_contact if is_collection else job.consignee_contact) or ""
+    phone = (job.shipper_phone if is_collection else job.consignee_phone) or ""
+    remark = " — ".join(dict.fromkeys(j.special_handling for j in group if j.special_handling))
+    waybillno = ", ".join(j.hawb_number for j in group)
+    reference = ", ".join(dict.fromkeys(
+        ref for j in group
+        if (ref := (j.shipper_reference if is_collection else j.consignee_reference))
+    ))
+    group_times = [(j.collection_at if is_collection else j.delivery_at) for j in group]
+    return {
+        "is_collection": is_collection,
+        "address": address,
+        "contact": contact,
+        "phone": phone,
+        "remark": remark,
+        "waybillno": waybillno,
+        "reference": reference,
+        "time": min((t for t in group_times if t is not None), default=None),
+        "group": group,
+    }
+
+
 def build_mytransport_order_payload(
     manifest: HawbManifest,
     job_groups: list[list[HawbJob]],
@@ -484,7 +537,15 @@ def build_mytransport_order_payload(
     resolve to the same physical address — rides along as its own destination
     (`collect_deliver` 0 for a Collection leg, 1 for a Delivery leg), with an
     `order_packages` entry pointing back at it by its 1-based position in
-    `order_destinations`."""
+    `order_destinations`. A Collection-leg group and a Delivery-leg group that
+    still resolve to the same physical address after that (e.g. a hospital
+    that's both where an inbound HAWB gets delivered and where a new outbound
+    one is collected) are folded into a single `collect_deliver: 2` destination
+    below — same address printed once — instead of sending the driver there
+    as two separate stops. Mirrors Horizon-Web's `groupDestinationStops`
+    preview grouping, now backed by a confirmed EasyTrans value (see
+    mytransport-export-integration.md — errorno 32's description lists
+    0/1/2 = pickup/delivery/pickup-and-delivery)."""
     job_groups = _collapse_same_stop_groups(job_groups, manifest)
     all_jobs = [job for group in job_groups for job in group]
     stop_times = [
@@ -496,61 +557,94 @@ def build_mytransport_order_payload(
     origin_contact, origin_phone = _matching_contact(manifest.start_point, all_jobs)
     destinations = [_destination(manifest.start_point, 0, origin_contact, origin_phone, "")]
     packages = []
-    for group in job_groups:
-        # A merged stop is one physical visit — if every HAWB in it is a
-        # backhaul collection at the End point, the whole stop is skipped from
-        # export (the vehicle is already headed there as the run's last leg).
-        if all(is_backhaul_collection(j, manifest) for j in group):
+
+    # A merged stop is one physical visit — if every HAWB in it is a
+    # backhaul collection at the End point, the whole stop is skipped from
+    # export (the vehicle is already headed there as the run's last leg).
+    stop_records = [
+        _stop_record(group) for group in job_groups
+        if not all(is_backhaul_collection(j, manifest) for j in group)
+    ]
+
+    # Slot stop_records by physical address: a Collection-leg record and a
+    # Delivery-leg record land in the same slot when their resolved address
+    # matches (there can be at most one of each per address, since
+    # `_collapse_same_stop_groups` already folded any same-leg duplicates);
+    # anything else gets its own slot. Order is preserved — a record either
+    # joins the earliest still-open slot for its address or opens a new one
+    # at its own position in the run order.
+    slots: list[list[dict]] = []
+    for record in stop_records:
+        identity = address_identity_key(record["address"])
+        slot = None
+        if identity is not None:
+            slot = next(
+                (s for s in slots if len(s) == 1
+                 and s[0]["is_collection"] != record["is_collection"]
+                 and address_identity_key(s[0]["address"]) == identity),
+                None,
+            )
+        if slot is not None:
+            slot.append(record)
+        else:
+            slots.append([record])
+
+    for slot in slots:
+        if len(slot) == 1:
+            record = slot[0]
+            group_date, group_time = to_mytransport_date_time(record["time"])
+            destinations.append(_destination(
+                record["address"], 0 if record["is_collection"] else 1,
+                record["contact"], record["phone"], record["remark"],
+                waybillno=record["waybillno"], customer_reference=record["reference"],
+                delivery_date=group_date, delivery_time=group_time,
+            ))
+            # Confirmed live against mytransport: order_packages can only
+            # point at a deliver destination (collect_deliver: 1) — pointing
+            # one at a collect_deliver: 0 stop is rejected outright
+            # ("destinationno N is not a deliver destination", errorno 43).
+            # A collection-leg stop still gets its destination entry above so
+            # the driver's route includes it; it just carries no package line.
+            if not record["is_collection"]:
+                packages.append(_package_line(record["group"], record["waybillno"], len(destinations)))
             continue
-        job = group[0]
-        is_collection = job.job_service_type == "collection"
-        # Reading the leg and the address off the first member is shorthand
-        # for a to-tier or manual group, where validate_merge_groups has
-        # already rejected any group whose members differ on either. For a
-        # contact-tier group it's a real choice: members may genuinely
-        # disagree on address, and the first one booked wins for the group.
-        address = job.shipper if is_collection else job.consignee
-        contact = (job.shipper_contact if is_collection else job.consignee_contact) or ""
-        phone = (job.shipper_phone if is_collection else job.consignee_phone) or ""
-        remark = " — ".join(dict.fromkeys(j.special_handling for j in group if j.special_handling))
-        waybillno = ", ".join(j.hawb_number for j in group)
-        reference = ", ".join(dict.fromkeys(
-            ref for j in group
-            if (ref := (j.shipper_reference if is_collection else j.consignee_reference))
-        ))
-        group_times = [(j.collection_at if is_collection else j.delivery_at) for j in group]
-        group_date, group_time = to_mytransport_date_time(
-            min((t for t in group_times if t is not None), default=None)
+
+        # Combined stop: one Collection-leg record and one Delivery-leg
+        # record at the same address, folded into one collect_deliver: 2
+        # destination. Contact/phone/date/time prefer the Delivery leg's own
+        # (the consignee contact at that site is the one actually signing for
+        # both legs in practice) and fall back to the Collection leg's when
+        # the Delivery leg didn't have one; waybillno/customer_reference/
+        # destination_remark are the union of both legs.
+        delivery_record = next(r for r in slot if not r["is_collection"])
+        collection_record = next(r for r in slot if r["is_collection"])
+        earliest_time = min(
+            (t for t in (delivery_record["time"], collection_record["time"]) if t is not None),
+            default=None,
         )
+        group_date, group_time = to_mytransport_date_time(earliest_time)
+        waybillno = ", ".join(dict.fromkeys(
+            part for r in (delivery_record, collection_record) for part in r["waybillno"].split(", ") if part
+        ))
+        reference = ", ".join(dict.fromkeys(
+            part for r in (delivery_record, collection_record) for part in r["reference"].split(", ") if part
+        ))
+        remark = " — ".join(dict.fromkeys(
+            r["remark"] for r in (delivery_record, collection_record) if r["remark"]
+        ))
         destinations.append(_destination(
-            address, 0 if is_collection else 1, contact, phone, remark,
-            waybillno=waybillno, customer_reference=reference,
+            delivery_record["address"], 2,
+            delivery_record["contact"] or collection_record["contact"],
+            delivery_record["phone"] or collection_record["phone"],
+            remark, waybillno=waybillno, customer_reference=reference,
             delivery_date=group_date, delivery_time=group_time,
         ))
-        # Confirmed live against mytransport: order_packages can only point at
-        # a deliver destination (collect_deliver: 1) — pointing one at a
-        # collect_deliver: 0 stop is rejected outright ("destinationno N is
-        # not a deliver destination", errorno 43). A collection-leg stop still
-        # gets its destination entry above so the driver's route includes it;
-        # it just carries no package line.
-        if not is_collection:
-            length, width, height = _parse_dimensions(job.dimensions)
-            # The goods description belongs here, not the HAWB number — that
-            # moved to the destination's own waybillno above now that the
-            # field exists. Falls back to the HAWB numbers only if extraction
-            # never captured a package content description.
-            contents = ", ".join(dict.fromkeys(
-                p.get("content_description") for p in (job.packages or []) if p.get("content_description")
-            ))
-            packages.append({
-                "deliver_destinationno": len(destinations),
-                "amount": sum(j.package_qty or 0 for j in group),
-                "weight": sum(float(j.weight_kg or 0) for j in group),
-                "length": length,
-                "width": width,
-                "height": height,
-                "description": contents or waybillno,
-            })
+        # `deliver_destinationno` pointing at a collect_deliver: 2 stop isn't
+        # confirmed live (only 0/1 have been exercised against the real API —
+        # see mytransport-export-integration.md) but follows directly from
+        # errorno 43's own wording ("... is not a deliver destination"): a
+        # pickup-and-delivery stop is a deliver destination.
+        packages.append(_package_line(delivery_record["group"], delivery_record["waybillno"], len(destinations)))
 
     # The route's end point is always the final destination — regardless of
     # whether a job already supplied a real Delivery leg. An explicit End
