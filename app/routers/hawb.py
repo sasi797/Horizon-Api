@@ -448,6 +448,7 @@ async def export_manifest(
         label for label, value in [
             ("Job reference", manifest.job_reference),
             ("Account number", manifest.account_number),
+            ("Customer number", manifest.customer_number),
             ("Vehicle size", manifest.vehicle_size),
         ] if not value
     ]
@@ -581,6 +582,8 @@ async def export_manifest_dual(
 
     if not manifest.start_point:
         raise HTTPException(status_code=409, detail="Missing required field before export: Start point")
+    if not (manifest.customer_number or "").strip().isdigit():
+        raise HTTPException(status_code=409, detail="Missing required field before export: Customer number")
 
     jobs_result = await db.execute(
         select(HawbJob).where(HawbJob.manifest_id == manifest_id).order_by(HawbJob.manifest_sequence)

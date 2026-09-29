@@ -129,6 +129,7 @@ class HawbManifestOut(BaseModel):
     skip_end_destination: bool
     job_reference: str | None
     account_number: str | None
+    customer_number: str | None
     vehicle_size: str | None
     service_type: str | None
     indigo_job_number: str | None
@@ -172,6 +173,7 @@ class ManifestUpdate(BaseModel):
     skip_end_destination: bool | None = None
     job_reference: str | None = None
     account_number: str | None = None
+    customer_number: str | None = None
     vehicle_size: str | None = None
     service_type: str | None = None
 

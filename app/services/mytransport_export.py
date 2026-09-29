@@ -668,7 +668,9 @@ def build_mytransport_order_payload(
         "time": time_str,
         "status": "submit",
         "productno": settings.MYTRANSPORT_PRODUCTNO,
-        "customerno": settings.MYTRANSPORT_CUSTOMERNO,
+        # Picked per manifest from the 'customer_number' dropdown; export
+        # is blocked upstream if it's empty.
+        "customerno": int(manifest.customer_number),
         "remark": manifest.job_reference or "",
         "order_destinations": destinations,
         "order_packages": packages,

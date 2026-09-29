@@ -62,6 +62,9 @@ class HawbManifest(Base):
     account_number: Mapped[str | None] = mapped_column(String(50))
     vehicle_size: Mapped[str | None] = mapped_column(String(30))
     service_type: Mapped[str | None] = mapped_column(String(50))
+    # mytransport/EasyTrans customer number, picked from the 'customer_number'
+    # dropdown (module='manifest') and sent as the order's `customerno`.
+    customer_number: Mapped[str | None] = mapped_column(String(20))
     # Export now books this manifest into Indigo and mytransport/EasyTrans
     # independently and concurrently — one can succeed while the other fails
     # (and gets retried on its own without re-booking the one that already

@@ -51,13 +51,13 @@ class Settings(BaseSettings):
     # mytransport.co.uk order_import integration — see
     # docs/mytransport-export-integration.md in Horizon-Web. One login for
     # the whole company (unlike Indigo, there's no per-account instance);
-    # productno/customerno are fixed per the payload the client tested in
-    # Postman — update these if that mapping ever changes.
+    # productno is fixed per the payload the client tested in Postman —
+    # update it if that mapping ever changes. customerno is chosen per
+    # manifest (the 'customer_number' dropdown).
     MYTRANSPORT_BASE_URL: str = "https://www.mytransport.co.uk/horizon-express/import_json.php"
     MYTRANSPORT_USERNAME: str = "john.southwell@horizon-express.co.uk"
     MYTRANSPORT_PASSWORD: str = "8xK3c6qp"
     MYTRANSPORT_PRODUCTNO: int = 1
-    MYTRANSPORT_CUSTOMERNO: int = 1
 
     # Indigo (NPA) AddJob integration — see docs/indigo-addjob-integration.md
     # in Horizon-Web. Runs alongside mytransport on every Export manifest
