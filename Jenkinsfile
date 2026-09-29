@@ -18,7 +18,7 @@ pipeline {
             steps {
                 sh '''
                     for i in $(seq 1 12); do
-                        if curl -sfkL https://nexus-api.linkworks.in/docs > /dev/null; then
+                        if curl -sfkL --connect-timeout 5 --max-time 10 https://split.api.spl-unboxed.com/docs > /dev/null; then
                             echo "API is up"
                             exit 0
                         fi
