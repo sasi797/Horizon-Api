@@ -303,41 +303,49 @@ def build_indigo_addjob_payload(
         # export one).
         if all(is_backhaul_collection(j, manifest) for j in group):
             continue
-        drop_no += 1
         job = group[0]
-        is_collection = job.job_service_type == "collection"
-        # Reading the leg and the address off the first member is shorthand
-        # for a to-tier or manual group, where validate_merge_groups has
-        # already rejected any group whose members differ on either. For a
-        # contact-tier group it's a real choice: members may genuinely
-        # disagree on address, and the first one booked wins for the group.
-        address = job.shipper if is_collection else job.consignee
-        addr_split = split_address(address)
-        addr_line = city_and_postcode_line(address)
-        # The times, though, genuinely can differ across a merged stop: the
-        # driver makes one visit and has to satisfy the tightest of them, so
-        # the drop carries the earliest rather than whichever HAWB sorted first.
-        stop_times = [j.collection_at if is_collection else j.delivery_at for j in group]
-        stop_time = min((t for t in stop_times if t is not None), default=None)
-        drops.append({
-            "DropNo": str(drop_no),
-            "Type": "Collection" if is_collection else "Delivery",
-            "DateTime": to_indigo_datetime(stop_time),
-            "Contact": (job.shipper_contact if is_collection else job.consignee_contact) or "",
-            "Company": addr_split["name"],
-            "Address1": addr_split["address"],
-            "Address2": "",
-            "Address3": "",
-            "Town": addr_line["town"],
-            "Postcode": addr_line["postcode"],
-            "Country": address_country(address),
-            "Telephone": (job.shipper_phone if is_collection else job.consignee_phone) or "",
-            "Insts": "",
-            "ReadyAt": "",
-            "PremisesClose": "",
-            "Packs": sum(j.package_qty or 0 for j in group),
-            "Weight": sum(float(j.weight_kg or 0) for j in group),
-        })
+        # A "collection_and_delivery" group (both ends of the route are UK,
+        # so this driver's run has to do both legs) books as two drops — a
+        # Collection at the shipper address and a Delivery at the consignee
+        # address — instead of one, mirroring Horizon-Web's
+        # buildDestinationStops and mytransport_export's own handling of it.
+        legs = [True, False] if job.job_service_type == "collection_and_delivery" else [job.job_service_type == "collection"]
+        for is_collection in legs:
+            drop_no += 1
+            # Reading the leg and the address off the first member is
+            # shorthand for a to-tier or manual group, where
+            # validate_merge_groups has already rejected any group whose
+            # members differ on either. For a contact-tier group it's a real
+            # choice: members may genuinely disagree on address, and the
+            # first one booked wins for the group.
+            address = job.shipper if is_collection else job.consignee
+            addr_split = split_address(address)
+            addr_line = city_and_postcode_line(address)
+            # The times, though, genuinely can differ across a merged stop:
+            # the driver makes one visit and has to satisfy the tightest of
+            # them, so the drop carries the earliest rather than whichever
+            # HAWB sorted first.
+            stop_times = [j.collection_at if is_collection else j.delivery_at for j in group]
+            stop_time = min((t for t in stop_times if t is not None), default=None)
+            drops.append({
+                "DropNo": str(drop_no),
+                "Type": "Collection" if is_collection else "Delivery",
+                "DateTime": to_indigo_datetime(stop_time),
+                "Contact": (job.shipper_contact if is_collection else job.consignee_contact) or "",
+                "Company": addr_split["name"],
+                "Address1": addr_split["address"],
+                "Address2": "",
+                "Address3": "",
+                "Town": addr_line["town"],
+                "Postcode": addr_line["postcode"],
+                "Country": address_country(address),
+                "Telephone": (job.shipper_phone if is_collection else job.consignee_phone) or "",
+                "Insts": "",
+                "ReadyAt": "",
+                "PremisesClose": "",
+                "Packs": sum(j.package_qty or 0 for j in group),
+                "Weight": sum(float(j.weight_kg or 0) for j in group),
+            })
 
     job_payload = {
         "JobGuid": uuid.uuid4().hex,

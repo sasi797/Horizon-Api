@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     ALLOWED_SENDER: str = ""
     # Only process emails received after this datetime (ISO format: 2026-05-25T15:30:00+05:30)
     PROCESS_EMAILS_SINCE: str = ""
+    # Public Horizon-Web URL, only used to put a manifest link in alert emails
+    # (leave empty to send them without one)
+    FRONTEND_BASE_URL: str = ""
 
     # Azure AD (client credentials — needs Mail.Read + Mail.ReadWrite Application permissions)
     AZURE_CLIENT_ID: str = ""

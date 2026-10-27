@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     s3_bucket: str = ""
     s3_prefix: str = "BTSEmailAttachments"
 
+    # Trace middleware push API (X-API-Key). Empty = endpoint disabled (503).
+    trace_api_key: str = ""
+
     # Anthropic / PDF extraction
     anthropic_api_key: str = ""
 
