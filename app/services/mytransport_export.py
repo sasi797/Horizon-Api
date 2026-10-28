@@ -224,15 +224,6 @@ def address_identity_key(value: str | None) -> str | None:
     return f"{name}|{last}"
 
 
-def normalize_uk_round_trips(jobs: list[HawbJob]) -> None:
-    """A UK-to-UK job is driven both ways, so it books as Collection + Delivery
-    whatever Del/Coll says (or doesn't) — mirrors Horizon-Web's `isUkRoundTrip`.
-    A job with one end abroad keeps its own Del/Coll (just the UK leg)."""
-    for job in jobs:
-        if address_country(job.shipper) == "United Kingdom" and address_country(job.consignee) == "United Kingdom":
-            job.job_service_type = "collection_and_delivery"
-
-
 def stop_address(job: HawbJob) -> str | None:
     """The address the driver physically visits for this HAWB's leg. A
     collection happens at the shipper, a delivery at the consignee — the other
@@ -504,16 +495,14 @@ def _collapse_same_stop_groups(
     return collapsed
 
 
-def _stop_record(group: list[HawbJob], is_collection: bool) -> dict:
+def _stop_record(group: list[HawbJob]) -> dict:
     job = group[0]
+    is_collection = job.job_service_type == "collection"
     # Reading the leg and the address off the first member is shorthand
     # for a to-tier or manual group, where validate_merge_groups has
     # already rejected any group whose members differ on either. For a
     # contact-tier group it's a real choice: members may genuinely
     # disagree on address, and the first one booked wins for the group.
-    # `is_collection` is passed in rather than read off job_service_type
-    # directly because a "collection_and_delivery" group books as both
-    # legs — see build_mytransport_order_payload.
     address = job.shipper if is_collection else job.consignee
     contact = (job.shipper_contact if is_collection else job.consignee_contact) or ""
     phone = (job.shipper_phone if is_collection else job.consignee_phone) or ""
@@ -543,22 +532,19 @@ def build_mytransport_order_payload(
 ) -> dict:
     """One manifest books as exactly one mytransport order: `order_destinations[0]`
     is the manifest's own Start point (`collect_deliver: 0`, the pickup), and
-    every HAWB stop in between — one per group from `group_jobs_by_merge`
-    (two, for a "collection_and_delivery" group — see the stop_records loop
-    below), after `_collapse_same_stop_groups` folds together any adjacent
-    groups that resolve to the same physical address — rides along as its own
-    destination (`collect_deliver` 0 for a Collection leg, 1 for a Delivery
-    leg), with an `order_packages` entry pointing back at it by its 1-based
-    position in `order_destinations`. A Collection-leg record and a
-    Delivery-leg record that resolve to the same physical address (e.g. a
-    hospital that's both where an inbound HAWB gets delivered and where a new
-    outbound one is collected — or a single "collection_and_delivery" HAWB
-    whose shipper and consignee happen to be the same site) are folded into a
-    single `collect_deliver: 2` destination below — same address printed once
-    — instead of sending the driver there as two separate stops. Mirrors
-    Horizon-Web's `groupDestinationStops` preview grouping, now backed by a
-    confirmed EasyTrans value (see mytransport-export-integration.md — errorno
-    32's description lists
+    every HAWB stop in between — one per group from `group_jobs_by_merge`,
+    after `_collapse_same_stop_groups` folds together any adjacent groups that
+    resolve to the same physical address — rides along as its own destination
+    (`collect_deliver` 0 for a Collection leg, 1 for a Delivery leg), with an
+    `order_packages` entry pointing back at it by its 1-based position in
+    `order_destinations`. A Collection-leg group and a Delivery-leg group that
+    still resolve to the same physical address after that (e.g. a hospital
+    that's both where an inbound HAWB gets delivered and where a new outbound
+    one is collected) are folded into a single `collect_deliver: 2` destination
+    below — same address printed once — instead of sending the driver there
+    as two separate stops. Mirrors Horizon-Web's `groupDestinationStops`
+    preview grouping, now backed by a confirmed EasyTrans value (see
+    mytransport-export-integration.md — errorno 32's description lists
     0/1/2 = pickup/delivery/pickup-and-delivery)."""
     job_groups = _collapse_same_stop_groups(job_groups, manifest)
     all_jobs = [job for group in job_groups for job in group]
@@ -568,32 +554,17 @@ def build_mytransport_order_payload(
     ]
     date_str, time_str = to_mytransport_date_time(min((t for t in stop_times if t is not None), default=None))
 
-    # A manifest with no Start point (Thinventory — each job is just its own
-    # Collection + Delivery) has no origin destination, and no End point
-    # either (resolve_end_point falls back to the blank Start point).
-    destinations = []
-    if manifest.start_point:
-        origin_contact, origin_phone = _matching_contact(manifest.start_point, all_jobs)
-        destinations.append(_destination(manifest.start_point, 0, origin_contact, origin_phone, ""))
+    origin_contact, origin_phone = _matching_contact(manifest.start_point, all_jobs)
+    destinations = [_destination(manifest.start_point, 0, origin_contact, origin_phone, "")]
     packages = []
 
     # A merged stop is one physical visit — if every HAWB in it is a
     # backhaul collection at the End point, the whole stop is skipped from
-    # export (the vehicle is already headed there as the run's last leg). A
-    # "collection_and_delivery" group (both ends of the route are UK, so
-    # this driver's run has to do both legs) produces two records — a
-    # collection at the shipper address and a delivery at the consignee
-    # address — instead of one, mirroring Horizon-Web's buildDestinationStops.
-    stop_records = []
-    for group in job_groups:
-        if all(is_backhaul_collection(j, manifest) for j in group):
-            continue
-        service_type = group[0].job_service_type
-        if service_type == "collection_and_delivery":
-            stop_records.append(_stop_record(group, is_collection=True))
-            stop_records.append(_stop_record(group, is_collection=False))
-        else:
-            stop_records.append(_stop_record(group, is_collection=service_type == "collection"))
+    # export (the vehicle is already headed there as the run's last leg).
+    stop_records = [
+        _stop_record(group) for group in job_groups
+        if not all(is_backhaul_collection(j, manifest) for j in group)
+    ]
 
     # Slot stop_records by physical address: a Collection-leg record and a
     # Delivery-leg record land in the same slot when their resolved address

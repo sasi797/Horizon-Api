@@ -3,11 +3,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import settings
-from app.services import hawb_extract, thinv_auto_export
+from app.services import hawb_extract
 from app.storage import upload_bytes
 
 logger = logging.getLogger(__name__)
@@ -154,19 +154,6 @@ async def ingest_email_batch(
                 source_message_id=source_message_id, sender_email=sender_email, subject=subject, email_body=email_body,
             )
 
-        # --- Classify by company template. Thinventory labels are companions
-        # (no manifest of their own) that merge into their delivery note, so
-        # they ride the blind-attachment path; everything else is plain. ---
-        label_atts: list[dict] = []
-        classified_plain: list[dict] = []
-        for att in plain_atts:
-            att["_kind"] = await asyncio.get_event_loop().run_in_executor(
-                None, hawb_extract.classify_document, att.get("data") or b"", att.get("filename") or ""
-            )
-            (label_atts if att["_kind"] == hawb_extract.KIND_THINVENTORY_LABEL else classified_plain).append(att)
-        plain_atts = classified_plain
-        blind_atts = blind_atts + label_atts
-
         # --- Extract phase: one HawbDocument per attachment, jobs held in memory ---
         plain_entries: list[tuple[HawbDocument, list[dict]]] = []
         for att in plain_atts:
@@ -197,32 +184,9 @@ async def ingest_email_batch(
         merged_hawb_numbers: set[str] = set()
         jobs_to_insert = []
 
-        # Thinventory delivery notes by Customer Reference, for label matching.
-        # A reference shared by several notes is ambiguous, so it never matches.
-        thin_by_custref: dict[str, list[tuple[HawbDocument, dict]]] = {}
-        for doc, jobs_data in plain_entries:
-            for job in jobs_data:
-                if _is_thinventory(job) and job.get("shipper_reference"):
-                    thin_by_custref.setdefault(str(job["shipper_reference"]).strip(), []).append((doc, job))
-        label_doc_by_hawb: dict[str, uuid.UUID] = {}
-
         # --- Merge phase: resolve each MF-PCS candidate against its plain companion ---
         for blind_doc, blind_jobs_data in blind_entries:
             for blind_job in blind_jobs_data:
-                if _is_thinventory(blind_job):
-                    custref = str(blind_job.get("shipper_reference") or "").strip()
-                    matches = thin_by_custref.get(custref, [])
-                    if len(matches) == 1:
-                        note_doc, note_job = matches[0]
-                        label_extra = {k: v for k, v in (blind_job.get("extra") or {}).items()
-                                       if k not in ("source_company", "document_type")}
-                        note_job.setdefault("extra", {})["thinventory_label"] = label_extra
-                        label_doc_by_hawb[(note_job.get("hawb_number") or "").strip()] = blind_doc.id
-                    else:
-                        why = "no matching delivery note" if not matches else "several delivery notes share that reference"
-                        note = f"Thinventory label (Cust Ref {custref or 'unreadable'}) not merged: {why}"
-                        blind_doc.error_message = note if not blind_doc.error_message else f"{blind_doc.error_message}; {note}"
-                    continue
                 hawb_number = (blind_job.get("hawb_number") or "").strip()
                 if not hawb_number:
                     continue
@@ -257,22 +221,19 @@ async def ingest_email_batch(
                 if not hawb_number or hawb_number in merged_hawb_numbers:
                     continue
                 jobs_to_insert.append(_build_job_row(
-                    job, document_id=doc.id, blind_document_id=label_doc_by_hawb.get(hawb_number),
-                    source_kind="plain", status=_plain_job_status(job),
+                    job, document_id=doc.id, blind_document_id=None,
+                    source_kind="plain", status="ready_to_manifest",
                 ))
 
         inserted_by_document, skip_notes_by_document = await _dedupe_and_insert_jobs(db, jobs_to_insert, email_body)
         await db.flush()
 
         # --- Plain documents: reuse (never recreate) the placeholder manifest created up front ---
-        thinv_manifest_ids = []
         for doc, _ in plain_entries:
             manifest = await db.get(HawbManifest, doc.manifest_id)
             await _apply_plain_extraction_outcome(
                 doc, manifest, inserted_by_document.get(doc.id, []), skip_notes_by_document.get(doc.id, []),
             )
-            if manifest.status == "open" and thinv_auto_export.is_thinventory_manifest(manifest):
-                thinv_manifest_ids.append(manifest.id)
 
         # --- Blind documents: unchanged — own manifest only if unmatched jobs landed on them ---
         for doc, _ in blind_entries:
@@ -301,10 +262,6 @@ async def ingest_email_batch(
                 hawb_job.manifest_sequence = sequence
 
         await db.commit()
-
-    # Only after the commit — the manifest and its jobs must be visible to the
-    # export's own session. Thinventory manifests book straight into EasyTrans.
-    await thinv_auto_export.auto_export_thinventory_manifests(thinv_manifest_ids)
 
 
 async def _dedupe_and_insert_jobs(db, jobs_to_insert: list, email_body: str | None):
@@ -480,34 +437,10 @@ async def _record_duplicate_attachment(
     db.add(document)
 
 
-def _is_thinventory(job: dict) -> bool:
-    return (job.get("extra") or {}).get("source_company") == "thinventory"
-
-
-def _plain_job_status(job: dict) -> str:
-    """Marken jobs go straight to ready_to_manifest. Thinventory delivery notes
-    never print weight, package count or dimensions, so they land in
-    pending_review (a reviewer fills the gaps, then approves) with the missing
-    fields listed in extra.review_flags."""
-    if not _is_thinventory(job):
-        return "ready_to_manifest"
-    missing = [label for key, label in (
-        ("weight_kg", "weight"), ("package_qty", "package quantity"),
-        ("dimensions", "dimensions"), ("collection_at", "collection time"),
-    ) if job.get(key) in (None, "")]
-    job.setdefault("extra", {})["review_flags"] = [f"Missing {m}" for m in missing]
-    return "pending_review"
-
-
-async def _run_extraction_for_document(file_bytes: bytes, filename: str, source_kind: str, kind: str | None = None):
-    loop = asyncio.get_event_loop()
+async def _run_extraction_for_document(file_bytes: bytes, filename: str, source_kind: str):
+    extractor = hawb_extract.extract_blind_candidates if source_kind == "blind" else hawb_extract.extract_jobs
     try:
-        if kind == hawb_extract.KIND_THINVENTORY_LABEL:
-            jobs_data = await loop.run_in_executor(None, hawb_extract.extract_thinventory_label_jobs, file_bytes, filename)
-        elif source_kind == "blind":
-            jobs_data = await loop.run_in_executor(None, hawb_extract.extract_blind_candidates, file_bytes, filename)
-        else:
-            jobs_data = await loop.run_in_executor(None, hawb_extract.extract_jobs, file_bytes, filename, kind)
+        jobs_data = await asyncio.get_event_loop().run_in_executor(None, extractor, file_bytes, filename)
         return jobs_data, None
     except Exception as e:
         logger.error("HAWB extraction failed for %s", filename, exc_info=True)
@@ -536,17 +469,9 @@ async def _extract_and_create_document(
     async with AsyncSessionLocal() as pre_db:
         manifest_id = None
         if source_kind == "plain":
-            # Marken manifests take their MARKEN-nnnnnnn reference from the
-            # column's DB default; Thinventory ones draw from their own
-            # sequence so the two numbering series stay independent.
-            ref_kwargs = {}
-            if att.get("_kind") == hawb_extract.KIND_THINVENTORY_NOTE:
-                ref_kwargs["reference_number"] = (await pre_db.execute(
-                    text("SELECT 'THINV-' || lpad(nextval('thinv_manifest_ref_seq')::text, 7, '0')")
-                )).scalar_one()
             placeholder_manifest = HawbManifest(
                 job_count=0, total_weight_kg=0.0, status="extracting",
-                source_kind="plain", created_by=None, **ref_kwargs,
+                source_kind="plain", created_by=None,
             )
             pre_db.add(placeholder_manifest)
             await pre_db.flush()
@@ -569,7 +494,7 @@ async def _extract_and_create_document(
         await pre_db.commit()
         doc_id = pending_doc.id
 
-    jobs_data, error_message = await _run_extraction_for_document(file_bytes, filename, source_kind, att.get("_kind"))
+    jobs_data, error_message = await _run_extraction_for_document(file_bytes, filename, source_kind)
 
     # Re-fetch into the batch's own session so job/manifest linkage below (job_count,
     # error_message, relationships) commits atomically with the rest of the batch.
@@ -609,7 +534,7 @@ async def retry_document_extraction(document_id: uuid.UUID) -> None:
 
         jobs_to_insert = [
             _build_job_row(job, document_id=document.id, blind_document_id=None,
-                            source_kind="plain", status=_plain_job_status(job))
+                            source_kind="plain", status="ready_to_manifest")
             for job in jobs_data if (job.get("hawb_number") or "").strip()
         ]
         inserted_by_document, skip_notes_by_document = await _dedupe_and_insert_jobs(db, jobs_to_insert, document.email_body_text)
@@ -617,12 +542,7 @@ async def retry_document_extraction(document_id: uuid.UUID) -> None:
         await _apply_plain_extraction_outcome(
             document, manifest, inserted_by_document.get(document.id, []), skip_notes_by_document.get(document.id, []),
         )
-        auto_export = manifest.status == "open" and thinv_auto_export.is_thinventory_manifest(manifest)
-        manifest_id = manifest.id  # read before commit expires the instance
         await db.commit()
-
-    if auto_export:
-        await thinv_auto_export.auto_export_thinventory_manifests([manifest_id])
 
 
 def _build_job_row(job: dict, *, document_id, blind_document_id, source_kind: str, status: str):

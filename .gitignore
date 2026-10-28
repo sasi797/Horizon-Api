@@ -1,5 +1,1 @@
-.env
-__pycache__/
-storage/
-docker-compose.override.yml
-.nexus/
+#gitignore
