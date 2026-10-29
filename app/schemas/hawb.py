@@ -132,9 +132,6 @@ class HawbManifestOut(BaseModel):
     customer_number: str | None
     vehicle_size: str | None
     service_type: str | None
-    indigo_job_number: str | None
-    indigo_export_status: str | None
-    indigo_export_error: str | None
     mytransport_order_no: str | None
     mytransport_tracking_url: str | None
     mytransport_export_status: str | None
@@ -201,6 +198,5 @@ class ExportSystemResult(BaseModel):
 
 
 class ExportManifestResponse(BaseModel):
-    indigo: ExportSystemResult
     mytransport: ExportSystemResult
     payloads: dict | None = None

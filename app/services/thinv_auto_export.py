@@ -4,8 +4,7 @@ A Thinventory delivery note always books the same way — no Start/End point
 (each job is just its own Collection and Delivery stop), same customer, same
 service/vehicle — so as soon as ingest has built the manifest
 this fills those defaults and books it into EasyTrans with no manual click.
-Indigo is deliberately not called; that stays a manual Export from the manifest
-page. If anything blocks the booking, the manifest keeps its defaults, records
+If anything blocks the booking, the manifest keeps its defaults, records
 the error against EasyTrans (so the manifest page shows it and offers Retry
 export) and an alert email goes to the shared mailbox.
 """

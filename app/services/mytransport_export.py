@@ -1,11 +1,9 @@
-"""Server-side mytransport.co.uk `order_import` integration — replaces the
-retired Indigo (NPA) `AddJob` integration.
+"""Server-side mytransport.co.uk `order_import` integration.
 
 Ported from Horizon-Web's `docs/mytransport-export-integration.md`, which has
 the full field-by-field reference for this payload.
 
-Runs server-side (not from the browser) for the same reasons the Indigo call
-did: the login must never ship in the frontend bundle, and a PHP endpoint
+Runs server-side (not from the browser) for these reasons: the login must never ship in the frontend bundle, and a PHP endpoint
 like this one is unlikely to have CORS enabled for a browser origin.
 """
 
@@ -392,8 +390,7 @@ def _matching_contact(address: str | None, jobs: list[HawbJob]) -> tuple[str, st
     """The Start point is picked from one of this manifest's own HAWB addresses
     (the exact same text as that job's shipper/consignee) — so the
     contact/phone for the origin destination can be borrowed from whichever
-    HAWB that address actually came from, rather than left blank. Ported from
-    Indigo's equivalent (`_matching_contact` in the retired indigo_export.py)."""
+    HAWB that address actually came from, rather than left blank."""
     if not address:
         return "", ""
     for job in jobs:

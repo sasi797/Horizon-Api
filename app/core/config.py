@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # mytransport.co.uk order_import integration — see
     # docs/mytransport-export-integration.md in Horizon-Web. One login for
-    # the whole company (unlike Indigo, there's no per-account instance);
+    # the whole company;
     # productno is fixed per the payload the client tested in Postman —
     # update it if that mapping ever changes. customerno is chosen per
     # manifest (the 'customer_number' dropdown).
@@ -61,29 +61,6 @@ class Settings(BaseSettings):
     MYTRANSPORT_USERNAME: str = "john.southwell@horizon-express.co.uk"
     MYTRANSPORT_PASSWORD: str = "8xK3c6qp"
     MYTRANSPORT_PRODUCTNO: int = 1
-
-    # Indigo (NPA) AddJob integration — see docs/indigo-addjob-integration.md
-    # in Horizon-Web. Runs alongside mytransport on every Export manifest
-    # click, not instead of it. Each customer account is a separate NPA
-    # instance with its own login, so the account number picked on the
-    # manifest decides where the export is booked and as whom. Keyed by the
-    # 'account_number' dropdown value exactly as it is stored on the
-    # manifest. Override the whole map in .env with a JSON object under the
-    # same name.
-    INDIGO_ACCOUNTS: dict[str, dict[str, str]] = {
-        "PS0011": {
-            "base_url": "https://horizonexpress.neilporterassociates.co.uk/iWebService/V1",
-            "username": "SPL",
-            "password": "TtOmyxHE",
-        },
-        # Dev/test sandbox account (client-provided) — same NPA test instance
-        # used before the export switch to EasyTrans, still live for testing.
-        "SPL001": {
-            "base_url": "https://apps.neilporterassociates.co.uk/iWebService/V1",
-            "username": "SPLTEST",
-            "password": "SPLTest123!",
-        },
-    }
 
     # Nexus has no API for us — employees are created by driving its New
     # Employee form in a headless browser (app/services/nexus_sync.py). These

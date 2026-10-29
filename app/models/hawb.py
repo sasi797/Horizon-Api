@@ -65,15 +65,8 @@ class HawbManifest(Base):
     # mytransport/EasyTrans customer number, picked from the 'customer_number'
     # dropdown (module='manifest') and sent as the order's `customerno`.
     customer_number: Mapped[str | None] = mapped_column(String(20))
-    # Export now books this manifest into Indigo and mytransport/EasyTrans
-    # independently and concurrently — one can succeed while the other fails
-    # (and gets retried on its own without re-booking the one that already
-    # went through), so each system's outcome is tracked separately rather
-    # than folded into the single manifest-wide `status`/`exported_at`.
-    # *_status is 'booked' / 'failed' / None (never attempted).
-    indigo_job_number: Mapped[str | None] = mapped_column(String(50))
-    indigo_export_status: Mapped[str | None] = mapped_column(String(20))
-    indigo_export_error: Mapped[str | None] = mapped_column(Text)
+    # Export books this manifest into mytransport/EasyTrans.
+    # mytransport_export_status is 'booked' / 'failed' / None (never attempted).
     mytransport_order_no: Mapped[str | None] = mapped_column(String(50))
     mytransport_tracking_url: Mapped[str | None] = mapped_column(Text)
     mytransport_export_status: Mapped[str | None] = mapped_column(String(20))

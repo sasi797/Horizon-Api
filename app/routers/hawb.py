@@ -19,7 +19,7 @@ from app.schemas.hawb import (
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
     HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
 )
-from app.services import indigo_export, mytransport_export, thinv_auto_export
+from app.services import mytransport_export, thinv_auto_export
 from app.services.hawb_ingest import _parse_dt, retry_document_extraction
 from app.storage import presigned_url
 
@@ -508,29 +508,6 @@ async def export_manifest(
     )
 
 
-async def _run_indigo_export(
-    manifest: HawbManifest, payload: dict, already_booked: bool,
-) -> ExportSystemResult:
-    if already_booked:
-        return ExportSystemResult(status="booked", reference=manifest.indigo_job_number)
-    try:
-        data = await indigo_export.call_indigo_addjob(payload, manifest.account_number)
-    except indigo_export.IndigoRequestError as exc:
-        return ExportSystemResult(status="failed", error=str(exc))
-    # The whole manifest is one Indigo Job, so this is all-or-nothing per
-    # system: either Indigo returns a JobNumber for it, or it doesn't and
-    # this system's leg is 'failed' (independent of how mytransport does).
-    results = data.get("Jobs", {}).get("Job", [])
-    result = results[0] if results else {}
-    job_number = result.get("JobNumber")
-    if job_number:
-        return ExportSystemResult(status="booked", reference=str(job_number))
-    return ExportSystemResult(
-        status="failed",
-        error=result.get("Errormessage") or f"Indigo rejected the job: {json.dumps(result)[:500]}",
-    )
-
-
 async def _run_mytransport_export(
     manifest: HawbManifest, payload: dict, already_booked: bool,
 ) -> ExportSystemResult:
@@ -560,29 +537,24 @@ async def export_manifest_dual(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Book this manifest into Indigo and mytransport/EasyTrans at once, both
-    fired concurrently — the manifest's Start point is the pickup, with every
-    HAWB stop riding along as its own drop/destination entry in each system's
-    own shape. Runs server-side so neither system's login ever ships in the
-    frontend bundle. Each system's outcome is tracked independently
-    (indigo_export_status / mytransport_export_status): the manifest locks as
-    soon as either books successfully, and a manifest with one system still
-    'failed' can be re-posted here to retry only that one — the system that
-    already booked is echoed back, never called twice. See Horizon-Web's
-    docs/indigo-addjob-integration.md and docs/mytransport-export-integration.md."""
+    """Book this manifest into mytransport/EasyTrans — the manifest's Start
+    point is the pickup, with every HAWB stop riding along as its own
+    drop/destination entry. Runs server-side so the login never ships in the
+    frontend bundle. The manifest locks once booked, and a manifest still
+    'failed' can be re-posted here to retry. See Horizon-Web's
+    docs/mytransport-export-integration.md."""
     manifest = await db.get(HawbManifest, manifest_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Manifest not found")
     if manifest.status not in ("open", "exported"):
         raise HTTPException(status_code=409, detail=f"Manifest is '{manifest.status}', not open")
-    indigo_already_booked = manifest.indigo_export_status == "booked"
     mytransport_already_booked = manifest.mytransport_export_status == "booked"
-    if manifest.status == "exported" and indigo_already_booked and mytransport_already_booked:
-        raise HTTPException(status_code=409, detail="Manifest has already been exported to both Indigo and EasyTrans")
+    if manifest.status == "exported" and mytransport_already_booked:
+        raise HTTPException(status_code=409, detail="Manifest has already been exported to EasyTrans")
 
     # Thinventory manifests have no Start/End point and book into EasyTrans
     # only (see thinv_auto_export) — this is the manual Retry for one whose
-    # automatic export failed, so it must not demand a Start point or touch Indigo.
+    # automatic export failed, so it must not demand a Start point.
     is_thinv = thinv_auto_export.is_thinventory_manifest(manifest)
     if not manifest.start_point and not is_thinv:
         raise HTTPException(status_code=409, detail="Missing required field before export: Start point")
@@ -593,8 +565,6 @@ async def export_manifest_dual(
         ("Vehicle size", manifest.vehicle_size),
         ("Job reference", manifest.job_reference),
     ]
-    if not is_thinv:  # Account number only picks the Indigo instance
-        required.insert(0, ("Account number", manifest.account_number))
     missing_fields = [label for label, value in required if not (value or "").strip()]
     if missing_fields:
         raise HTTPException(status_code=409, detail=f"Missing required fields before export: {', '.join(missing_fields)}")
@@ -631,14 +601,13 @@ async def export_manifest_dual(
         raise HTTPException(status_code=409, detail=" ".join(conflicts))
     groups_only = [group for _, group in job_groups]
     mytransport_payload = mytransport_export.build_mytransport_order_payload(manifest, groups_only)
-    indigo_payload = {} if is_thinv else indigo_export.build_indigo_addjob_payload(manifest.service_type or "", manifest, groups_only)
 
     # mytransport requires at least one real stop besides the guaranteed
     # Start point (and the End point, when build_mytransport_order_payload is
     # booking it as its own closing destination too) — fewer means every job
     # group was skipped as a backhaul collection, confirmed live (errorno 30,
     # "A minimum of two destinations... is required") that EasyTrans rejects
-    # a route with nothing real on it. Indigo has no equivalent minimum.
+    # a route with nothing real on it.
     closes_at_end_point = bool(mytransport_export.resolve_end_point(manifest))
     real_stop_count = (
         len(mytransport_payload["orders"][0]["order_destinations"])
@@ -652,33 +621,18 @@ async def export_manifest_dual(
         )
 
     if body.dry_run:
-        # Unlike Indigo (auth in a header), mytransport's login travels inside
-        # the body itself — redact it before handing the payload back to
+        # mytransport's login travels inside the body itself — redact it before handing the payload back to
         # whichever authenticated staff member happened to call dry_run.
         redacted_mytransport = {
             **mytransport_payload,
             "authentication": {**mytransport_payload["authentication"], "password": "***"},
         }
         return ExportManifestResponse(
-            indigo=ExportSystemResult(status="skipped"),
             mytransport=ExportSystemResult(status="skipped"),
-            payloads={"indigo": indigo_payload, "mytransport": redacted_mytransport},
+            payloads={"mytransport": redacted_mytransport},
         )
 
-    if is_thinv:
-        indigo_result = ExportSystemResult(status="skipped")
-        mytransport_result = await _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked)
-    else:
-        indigo_result, mytransport_result = await asyncio.gather(
-            _run_indigo_export(manifest, indigo_payload, indigo_already_booked),
-            _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked),
-        )
-
-    if not is_thinv:
-        if indigo_result.status == "booked":
-            manifest.indigo_job_number = indigo_result.reference
-        manifest.indigo_export_status = indigo_result.status
-        manifest.indigo_export_error = indigo_result.error
+    mytransport_result = await _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked)
 
     if mytransport_result.status == "booked":
         manifest.mytransport_order_no = mytransport_result.reference
@@ -686,11 +640,9 @@ async def export_manifest_dual(
     manifest.mytransport_export_status = mytransport_result.status
     manifest.mytransport_export_error = mytransport_result.error
 
-    # The manifest locks as soon as either system has booked it — that leg is
-    # live and can't be un-booked by leaving the manifest editable. A system
-    # that's still 'failed' stays retryable (see already_booked above) without
-    # touching the one that already went through.
-    if (indigo_result.status == "booked" or mytransport_result.status == "booked") and manifest.status != "exported":
+    # The manifest locks as soon as it books — that can't be un-booked by
+    # leaving the manifest editable. A 'failed' booking stays retryable.
+    if mytransport_result.status == "booked" and manifest.status != "exported":
         now = datetime.now(timezone.utc)
         for job in jobs:
             job.locked = True
@@ -701,7 +653,7 @@ async def export_manifest_dual(
 
     await db.commit()
 
-    return ExportManifestResponse(indigo=indigo_result, mytransport=mytransport_result)
+    return ExportManifestResponse(mytransport=mytransport_result)
 
 
 @router.post("/manifests/{manifest_id}/cancel", response_model=HawbManifestOut)
