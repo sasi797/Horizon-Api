@@ -447,7 +447,6 @@ async def export_manifest(
     missing_fields = [
         label for label, value in [
             ("Job reference", manifest.job_reference),
-            ("Account number", manifest.account_number),
             ("Customer number", manifest.customer_number),
             ("Vehicle size", manifest.vehicle_size),
         ] if not value

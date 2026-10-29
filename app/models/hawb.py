@@ -59,7 +59,6 @@ class HawbManifest(Base):
     # nowhere to close the loop. See mytransport_export.build_mytransport_order_payload.
     skip_end_destination: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     job_reference: Mapped[str | None] = mapped_column(String(100))
-    account_number: Mapped[str | None] = mapped_column(String(50))
     vehicle_size: Mapped[str | None] = mapped_column(String(30))
     service_type: Mapped[str | None] = mapped_column(String(50))
     # mytransport/EasyTrans customer number, picked from the 'customer_number'

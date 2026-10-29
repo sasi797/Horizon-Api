@@ -95,7 +95,6 @@ async def create_trace_manifest(
         source_kind="plain",
         start_point=body.start_point,
         end_point=body.end_point,
-        account_number=body.account_number,
         vehicle_size=body.vehicle_size,
         customer_number=body.customer_number,
         created_by=None,

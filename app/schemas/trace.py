@@ -72,7 +72,6 @@ class TraceManifestIn(BaseModel):
     external_ref: str = Field(min_length=1, max_length=100, description="Trace/middleware's own manifest ID; makes retries idempotent")
     start_point: str | None = None
     end_point: str | None = None
-    account_number: str | None = Field(None, max_length=50)
     vehicle_size: str | None = Field(None, max_length=30)
     customer_number: str | None = Field(None, max_length=20)
     jobs: list[TraceJobIn] = Field(min_length=1, max_length=200)
