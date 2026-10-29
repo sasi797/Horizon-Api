@@ -19,7 +19,7 @@ from app.schemas.hawb import (
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
     HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
 )
-from app.services import indigo_export, mytransport_export
+from app.services import indigo_export, mytransport_export, thinv_auto_export
 from app.services.hawb_ingest import _parse_dt, retry_document_extraction
 from app.storage import presigned_url
 
@@ -580,10 +580,24 @@ async def export_manifest_dual(
     if manifest.status == "exported" and indigo_already_booked and mytransport_already_booked:
         raise HTTPException(status_code=409, detail="Manifest has already been exported to both Indigo and EasyTrans")
 
-    if not manifest.start_point:
+    # Thinventory manifests have no Start/End point and book into EasyTrans
+    # only (see thinv_auto_export) — this is the manual Retry for one whose
+    # automatic export failed, so it must not demand a Start point or touch Indigo.
+    is_thinv = thinv_auto_export.is_thinventory_manifest(manifest)
+    if not manifest.start_point and not is_thinv:
         raise HTTPException(status_code=409, detail="Missing required field before export: Start point")
     if not (manifest.customer_number or "").strip().isdigit():
         raise HTTPException(status_code=409, detail="Missing required field before export: Customer number")
+    required = [
+        ("Service type", manifest.service_type),
+        ("Vehicle size", manifest.vehicle_size),
+        ("Job reference", manifest.job_reference),
+    ]
+    if not is_thinv:  # Account number only picks the Indigo instance
+        required.insert(0, ("Account number", manifest.account_number))
+    missing_fields = [label for label, value in required if not (value or "").strip()]
+    if missing_fields:
+        raise HTTPException(status_code=409, detail=f"Missing required fields before export: {', '.join(missing_fields)}")
 
     jobs_result = await db.execute(
         select(HawbJob).where(HawbJob.manifest_id == manifest_id).order_by(HawbJob.manifest_sequence)
@@ -592,11 +606,14 @@ async def export_manifest_dual(
     if not jobs:
         raise HTTPException(status_code=409, detail="Manifest has no jobs to export")
 
+    mytransport_export.normalize_uk_round_trips(jobs)
+
     # Del/Coll decides which end of a HAWB is the stop the driver actually
     # makes, so a blank one has no address to book against — and defaulting it
     # would silently pick a country. Rejected here rather than guessed.
     missing_service = [
-        j.hawb_number for j in jobs if j.job_service_type not in ("collection", "delivery")
+        j.hawb_number for j in jobs
+        if j.job_service_type not in ("collection", "delivery", "collection_and_delivery")
     ]
     if missing_service:
         raise HTTPException(
@@ -614,7 +631,7 @@ async def export_manifest_dual(
         raise HTTPException(status_code=409, detail=" ".join(conflicts))
     groups_only = [group for _, group in job_groups]
     mytransport_payload = mytransport_export.build_mytransport_order_payload(manifest, groups_only)
-    indigo_payload = indigo_export.build_indigo_addjob_payload(manifest.service_type or "", manifest, groups_only)
+    indigo_payload = {} if is_thinv else indigo_export.build_indigo_addjob_payload(manifest.service_type or "", manifest, groups_only)
 
     # mytransport requires at least one real stop besides the guaranteed
     # Start point (and the End point, when build_mytransport_order_payload is
@@ -623,7 +640,10 @@ async def export_manifest_dual(
     # "A minimum of two destinations... is required") that EasyTrans rejects
     # a route with nothing real on it. Indigo has no equivalent minimum.
     closes_at_end_point = bool(mytransport_export.resolve_end_point(manifest))
-    real_stop_count = len(mytransport_payload["orders"][0]["order_destinations"]) - 1 - (1 if closes_at_end_point else 0)
+    real_stop_count = (
+        len(mytransport_payload["orders"][0]["order_destinations"])
+        - (1 if manifest.start_point else 0) - (1 if closes_at_end_point else 0)
+    )
     if real_stop_count < 1:
         raise HTTPException(
             status_code=409,
@@ -645,15 +665,20 @@ async def export_manifest_dual(
             payloads={"indigo": indigo_payload, "mytransport": redacted_mytransport},
         )
 
-    indigo_result, mytransport_result = await asyncio.gather(
-        _run_indigo_export(manifest, indigo_payload, indigo_already_booked),
-        _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked),
-    )
+    if is_thinv:
+        indigo_result = ExportSystemResult(status="skipped")
+        mytransport_result = await _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked)
+    else:
+        indigo_result, mytransport_result = await asyncio.gather(
+            _run_indigo_export(manifest, indigo_payload, indigo_already_booked),
+            _run_mytransport_export(manifest, mytransport_payload, mytransport_already_booked),
+        )
 
-    if indigo_result.status == "booked":
-        manifest.indigo_job_number = indigo_result.reference
-    manifest.indigo_export_status = indigo_result.status
-    manifest.indigo_export_error = indigo_result.error
+    if not is_thinv:
+        if indigo_result.status == "booked":
+            manifest.indigo_job_number = indigo_result.reference
+        manifest.indigo_export_status = indigo_result.status
+        manifest.indigo_export_error = indigo_result.error
 
     if mytransport_result.status == "booked":
         manifest.mytransport_order_no = mytransport_result.reference
