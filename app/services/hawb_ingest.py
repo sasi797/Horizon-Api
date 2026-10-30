@@ -493,7 +493,11 @@ async def _record_duplicate_attachment(
     db.add(document)
 
     if "reference_number" in ref_kwargs:
-        await thinv_auto_export.send_duplicate_email(ref_kwargs["reference_number"], str(manifest.id), filename)
+        try:
+            await thinv_auto_export.send_duplicate_email(ref_kwargs["reference_number"], str(manifest.id), filename)
+        except Exception:
+            # An alert problem must never roll back the ingest it reports on.
+            logger.error("THINV duplicate alert for %s failed", ref_kwargs["reference_number"], exc_info=True)
 
 
 def _is_thinventory(job: dict) -> bool:

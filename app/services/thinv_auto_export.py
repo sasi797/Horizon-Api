@@ -158,7 +158,7 @@ _TONES = {"red": ("#dc2626", "#fef2f2", "#991b1b"), "amber": ("#f59e0b", "#fffbe
 
 
 def _env_label() -> str:
-    return (settings.APP_ENV or "local").strip().upper()
+    return (getattr(settings, "APP_ENV", "") or "local").strip().upper()
 
 
 def _alert_html(tone: str, label: str, reference: str, message: str, link: str, reason: str = "", hint: str = "") -> str:
