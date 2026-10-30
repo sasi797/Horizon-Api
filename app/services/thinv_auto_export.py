@@ -30,6 +30,7 @@ DEFAULT_VEHICLE_SIZE = "Small Van"
 # Skipped by the inbox poller so the alert, sent to the same mailbox it
 # polls, is never mistaken for an inbound booking email.
 ALERT_SUBJECT_PREFIX = "[Horizon] THINV auto-export failed"
+EXTRACTION_ALERT_SUBJECT_PREFIX = "[Horizon] THINV extraction failed"
 
 
 def is_thinventory_manifest(manifest: HawbManifest) -> bool:
@@ -152,14 +153,6 @@ async def auto_export_thinventory_manifest(manifest_id) -> None:
 
 
 async def _send_failure_email(reference: str, manifest_id: str, error: str) -> None:
-    from app.routers.email_messages import _send_via_graph
-
-    # ALLOWED_SENDER is an external (Gmail) address Graph can't send as, so the
-    # alert goes from the company mailbox to itself — it lands in its inbox.
-    sender = recipient = (settings.MAILBOX_EMAIL or "").strip()
-    if not sender:
-        logger.error("THINV auto-export failed for %s but MAILBOX_EMAIL isn't set: %s", reference, error)
-        return
     link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/dashboard/manifests/{manifest_id}" if settings.FRONTEND_BASE_URL else ""
     body = (
         f"Manifest {reference} could not be exported to EasyTrans automatically.\n\n"
@@ -167,12 +160,36 @@ async def _send_failure_email(reference: str, manifest_id: str, error: str) -> N
         "Open the manifest, correct the details, then click Export manifest again."
         + (f"\n\n{link}" if link else "")
     )
+    await _send_alert(f"{ALERT_SUBJECT_PREFIX} — {reference}", body, reference, error)
+
+
+async def send_extraction_failure_email(reference: str, manifest_id: str, error: str) -> None:
+    """Alert for a Thinventory PDF whose extraction failed, so the manifest
+    never sits in Failed unnoticed. Never raises."""
+    link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/dashboard/manifests/{manifest_id}" if settings.FRONTEND_BASE_URL else ""
+    body = (
+        f"Manifest {reference} could not be read from its Thinventory delivery note.\n\n"
+        f"Reason: {error}\n\n"
+        "Open the manifest and click Retry on the Extract column once the cause is fixed."
+        + (f"\n\n{link}" if link else "")
+    )
+    await _send_alert(f"{EXTRACTION_ALERT_SUBJECT_PREFIX} — {reference}", body, reference, error)
+
+
+async def _send_alert(subject: str, body: str, reference: str, error: str) -> None:
+    from app.routers.email_messages import _send_via_graph
+
+    # ALLOWED_SENDER is an external (Gmail) address Graph can't send as, so the
+    # alert is sent from the company mailbox to the control address.
+    sender = (settings.MAILBOX_EMAIL or "").strip()
+    recipient = (settings.THINV_ALERT_EMAIL or "").strip() or sender
+    if not sender:
+        logger.error("THINV alert for %s not sent, MAILBOX_EMAIL isn't set: %s", reference, error)
+        return
     try:
-        await _send_via_graph(
-            sender, [recipient], f"{ALERT_SUBJECT_PREFIX} — {reference}", body, [],
-        )
+        await _send_via_graph(sender, [recipient], subject, body, [])
     except Exception:
-        logger.error("THINV auto-export failure email for %s could not be sent", reference, exc_info=True)
+        logger.error("THINV alert email for %s could not be sent", reference, exc_info=True)
 
 
 async def auto_export_thinventory_manifests(manifest_ids) -> None:

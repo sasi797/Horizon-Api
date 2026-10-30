@@ -455,9 +455,22 @@ async def _record_duplicate_attachment(
     key = f"{settings.s3_prefix}/hawb/{source_message_id or 'manual'}/{filename}"
     await upload_bytes(file_bytes, key, content_type="application/octet-stream")
 
+    # The reference prefix comes from the company template: Thinventory
+    # manifests draw THINV-nnnnnnn, everything else takes the column's MARKEN
+    # default. Classification is a single cheap call and falls back to Marken.
+    ref_kwargs = {}
+    if source_kind == "plain" and file_bytes and filename.lower().endswith(".pdf"):
+        kind = await asyncio.get_event_loop().run_in_executor(
+            None, hawb_extract.classify_document, file_bytes, filename
+        )
+        if kind in (hawb_extract.KIND_THINVENTORY_NOTE, hawb_extract.KIND_THINVENTORY_LABEL):
+            ref_kwargs["reference_number"] = (await db.execute(
+                text("SELECT 'THINV-' || lpad(nextval('thinv_manifest_ref_seq')::text, 7, '0')")
+            )).scalar_one()
+
     manifest = HawbManifest(
         job_count=0, total_weight_kg=0.0, status="ignored",
-        source_kind=source_kind, created_by=None,
+        source_kind=source_kind, created_by=None, **ref_kwargs,
     )
     db.add(manifest)
     await db.flush()
@@ -577,6 +590,10 @@ async def _extract_and_create_document(
     document.processed_at = datetime.now(timezone.utc)
     document.status = "failed" if error_message else "processed"
     document.error_message = error_message
+    if error_message and manifest_id and att.get("_kind") == hawb_extract.KIND_THINVENTORY_NOTE:
+        await thinv_auto_export.send_extraction_failure_email(
+            ref_kwargs["reference_number"], str(manifest_id), error_message,
+        )
     return document, jobs_data
 
 
@@ -606,6 +623,10 @@ async def retry_document_extraction(document_id: uuid.UUID) -> None:
         document.processed_at = datetime.now(timezone.utc)
         document.status = "failed" if error_message else "processed"
         document.error_message = error_message
+        if error_message and thinv_auto_export.is_thinventory_manifest(manifest):
+            await thinv_auto_export.send_extraction_failure_email(
+                manifest.reference_number, str(manifest.id), error_message,
+            )
 
         jobs_to_insert = [
             _build_job_row(job, document_id=document.id, blind_document_id=None,

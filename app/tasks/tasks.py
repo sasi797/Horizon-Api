@@ -460,8 +460,8 @@ async def _poll_inbox_async():
                 continue
             # Our own THINV auto-export alert, sent from ALLOWED_SENDER into this
             # mailbox — not a booking or HAWB email.
-            from app.services.thinv_auto_export import ALERT_SUBJECT_PREFIX
-            if subject.startswith(ALERT_SUBJECT_PREFIX):
+            from app.services.thinv_auto_export import ALERT_SUBJECT_PREFIX, EXTRACTION_ALERT_SUBJECT_PREFIX
+            if subject.startswith((ALERT_SUBJECT_PREFIX, EXTRACTION_ALERT_SUBJECT_PREFIX)):
                 _graph_mark_read(client, token, mailbox, graph_msg_id)
                 continue
             raw_message_id = msg.get("internetMessageId")
