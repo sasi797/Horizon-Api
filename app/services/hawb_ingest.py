@@ -492,6 +492,9 @@ async def _record_duplicate_attachment(
     )
     db.add(document)
 
+    if "reference_number" in ref_kwargs:
+        await thinv_auto_export.send_duplicate_email(ref_kwargs["reference_number"], str(manifest.id), filename)
+
 
 def _is_thinventory(job: dict) -> bool:
     return (job.get("extra") or {}).get("source_company") == "thinventory"

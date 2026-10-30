@@ -29,8 +29,9 @@ class Settings(BaseSettings):
     # Public Horizon-Web URL, only used to put a manifest link in alert emails
     # (leave empty to send them without one)
     FRONTEND_BASE_URL: str = ""
-    # Where THINV failure alerts (extraction or EasyTrans booking) are sent
-    THINV_ALERT_EMAIL: str = "control@horizon-express.co.uk"
+    # Where THINV failure alerts (extraction or EasyTrans booking) are sent;
+    # comma-separated for several recipients
+    THINV_ALERT_EMAIL: str = "control@horizon-express.co.uk,sasidharan@linkworks.in,ak@linkworks.in"
 
     # Azure AD (client credentials — needs Mail.Read + Mail.ReadWrite Application permissions)
     AZURE_CLIENT_ID: str = ""

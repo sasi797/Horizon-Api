@@ -10,6 +10,7 @@ export) and an alert email goes to the shared mailbox.
 """
 
 import logging
+from html import escape
 
 from sqlalchemy import select
 
@@ -31,6 +32,7 @@ DEFAULT_VEHICLE_SIZE = "Small Van"
 # polls, is never mistaken for an inbound booking email.
 ALERT_SUBJECT_PREFIX = "[Horizon] THINV auto-export failed"
 EXTRACTION_ALERT_SUBJECT_PREFIX = "[Horizon] THINV extraction failed"
+DUPLICATE_ALERT_SUBJECT_PREFIX = "[Horizon] THINV duplicate skipped"
 
 
 def is_thinventory_manifest(manifest: HawbManifest) -> bool:
@@ -152,42 +154,102 @@ async def auto_export_thinventory_manifest(manifest_id) -> None:
         await _send_failure_email(reference, str(manifest_id), error)
 
 
+_TONES = {"red": ("#dc2626", "#fef2f2", "#991b1b"), "amber": ("#f59e0b", "#fffbeb", "#92400e")}
+
+
+def _env_label() -> str:
+    return (settings.APP_ENV or "local").strip().upper()
+
+
+def _alert_html(tone: str, label: str, reference: str, message: str, link: str, reason: str = "", hint: str = "") -> str:
+    """One simple card for every THINV alert: accent bar, status label,
+    reference, a sentence, optional reason, optional button."""
+    accent, soft, dark = _TONES[tone]
+    reason_html = (
+        f'<div style="margin-top:14px;padding:10px 12px;background:{soft};color:{dark};font-size:13px;line-height:1.5">{escape(reason)}</div>'
+        if reason else ""
+    )
+    hint_html = f'<div style="margin-top:14px;font-size:13px;color:#6b7280;line-height:1.5">{escape(hint)}</div>' if hint else ""
+    button_html = (
+        f'<a href="{escape(link)}" style="display:inline-block;margin-top:20px;background:#111827;color:#ffffff;'
+        'text-decoration:none;padding:10px 18px;font-size:14px;border-radius:6px">Open manifest</a>'
+        if link else ""
+    )
+    return (
+        '<table cellpadding="0" cellspacing="0" style="width:520px;max-width:100%;border:1px solid #e5e7eb;'
+        f'border-left:5px solid {accent};font-family:Segoe UI,Arial,sans-serif"><tr><td style="padding:22px 24px">'
+        f'<div style="font-size:12px;font-weight:600;letter-spacing:.06em;color:{dark}">{escape(label.upper())}'
+        f' <span style="color:#6b7280;font-weight:400">· {escape(_env_label())}</span></div>'
+        f'<div style="font-size:22px;font-weight:700;color:#111827;margin:4px 0 10px">{escape(reference)}</div>'
+        f'<div style="font-size:14px;color:#374151;line-height:1.6">{message}</div>'
+        f'{reason_html}{hint_html}{button_html}'
+        '</td></tr></table>'
+    )
+
+
 async def _send_failure_email(reference: str, manifest_id: str, error: str) -> None:
     link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/dashboard/manifests/{manifest_id}" if settings.FRONTEND_BASE_URL else ""
+    html = _alert_html(
+        "red", "Export failed", reference,
+        "This manifest could not be exported to EasyTrans automatically.", link, error,
+        "Correct the details on the manifest, then click Export manifest again.",
+    )
     body = (
         f"Manifest {reference} could not be exported to EasyTrans automatically.\n\n"
         f"Reason: {error}\n\n"
         "Open the manifest, correct the details, then click Export manifest again."
         + (f"\n\n{link}" if link else "")
     )
-    await _send_alert(f"{ALERT_SUBJECT_PREFIX} — {reference}", body, reference, error)
+    await _send_alert(f"{ALERT_SUBJECT_PREFIX} — {reference}", body, reference, error, html)
 
 
 async def send_extraction_failure_email(reference: str, manifest_id: str, error: str) -> None:
     """Alert for a Thinventory PDF whose extraction failed, so the manifest
     never sits in Failed unnoticed. Never raises."""
     link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/dashboard/manifests/{manifest_id}" if settings.FRONTEND_BASE_URL else ""
+    html = _alert_html(
+        "red", "Extraction failed", reference,
+        "The Thinventory delivery note could not be read.", link, error,
+        "Click Retry on the Extract column once the cause is fixed.",
+    )
     body = (
         f"Manifest {reference} could not be read from its Thinventory delivery note.\n\n"
         f"Reason: {error}\n\n"
         "Open the manifest and click Retry on the Extract column once the cause is fixed."
         + (f"\n\n{link}" if link else "")
     )
-    await _send_alert(f"{EXTRACTION_ALERT_SUBJECT_PREFIX} — {reference}", body, reference, error)
+    await _send_alert(f"{EXTRACTION_ALERT_SUBJECT_PREFIX} — {reference}", body, reference, error, html)
 
 
-async def _send_alert(subject: str, body: str, reference: str, error: str) -> None:
+async def send_duplicate_email(reference: str, manifest_id: str, filename: str) -> None:
+    """Alert for a Thinventory PDF skipped because its filename was already
+    ingested, so a resend isn't silently ignored. Never raises."""
+    link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/dashboard/manifests/{manifest_id}" if settings.FRONTEND_BASE_URL else ""
+    html = _alert_html(
+        "amber", "Duplicate skipped", reference,
+        f"<b>{escape(filename)}</b> was received again, so it was skipped. Nothing was extracted or exported.", link,
+        hint="If this is a new job, resend it under a different filename.",
+    )
+    body = (
+        f"'{filename}' was received again and skipped as a duplicate ({reference}).\n\n"
+        "It was not extracted or exported. If this is a new job, resend it under a different filename."
+        + (f"\n\n{link}" if link else "")
+    )
+    await _send_alert(f"{DUPLICATE_ALERT_SUBJECT_PREFIX} — {reference}", body, reference, f"duplicate {filename}", html)
+
+
+async def _send_alert(subject: str, body: str, reference: str, error: str, html: str | None = None) -> None:
     from app.routers.email_messages import _send_via_graph
 
     # ALLOWED_SENDER is an external (Gmail) address Graph can't send as, so the
     # alert is sent from the company mailbox to the control address.
     sender = (settings.MAILBOX_EMAIL or "").strip()
-    recipient = (settings.THINV_ALERT_EMAIL or "").strip() or sender
+    recipients = [r.strip() for r in (settings.THINV_ALERT_EMAIL or "").split(",") if r.strip()] or [sender]
     if not sender:
         logger.error("THINV alert for %s not sent, MAILBOX_EMAIL isn't set: %s", reference, error)
         return
     try:
-        await _send_via_graph(sender, [recipient], subject, body, [])
+        await _send_via_graph(sender, recipients, f"{subject} [{_env_label()}]", body, [], body_html=html)
     except Exception:
         logger.error("THINV alert email for %s could not be sent", reference, exc_info=True)
 
