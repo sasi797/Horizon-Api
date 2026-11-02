@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # Where THINV failure alerts (extraction or EasyTrans booking) are sent;
     # comma-separated for several recipients
     THINV_ALERT_EMAIL: str = "control@horizon-express.co.uk,sasidharan@linkworks.in,ak@linkworks.in"
+    # Mailbox THINV alerts are sent FROM (empty = MAILBOX_EMAIL). Send-only;
+    # polling always uses MAILBOX_EMAIL.
+    THINV_ALERT_FROM: str = ""
+    # Optional Azure app used only to send alerts, for when THINV_ALERT_FROM is
+    # in a different tenant than MAILBOX_EMAIL (empty = use the AZURE_* app above).
+    # Needs Mail.Send Application permission.
+    THINV_ALERT_AZURE_TENANT_ID: str = ""
+    THINV_ALERT_AZURE_CLIENT_ID: str = ""
+    THINV_ALERT_AZURE_CLIENT_SECRET: str = ""
 
     # Azure AD (client credentials — needs Mail.Read + Mail.ReadWrite Application permissions)
     AZURE_CLIENT_ID: str = ""

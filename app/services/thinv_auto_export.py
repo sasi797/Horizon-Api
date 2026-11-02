@@ -243,15 +243,49 @@ async def _send_alert(subject: str, body: str, reference: str, error: str, html:
 
     # ALLOWED_SENDER is an external (Gmail) address Graph can't send as, so the
     # alert is sent from the company mailbox to the control address.
-    sender = (settings.MAILBOX_EMAIL or "").strip()
+    sender = (settings.THINV_ALERT_FROM or settings.MAILBOX_EMAIL or "").strip()
     recipients = [r.strip() for r in (settings.THINV_ALERT_EMAIL or "").split(",") if r.strip()] or [sender]
     if not sender:
         logger.error("THINV alert for %s not sent, MAILBOX_EMAIL isn't set: %s", reference, error)
         return
+    full_subject = f"{subject} [{_env_label()}]"
     try:
-        await _send_via_graph(sender, recipients, f"{subject} [{_env_label()}]", body, [], body_html=html)
+        if settings.THINV_ALERT_AZURE_CLIENT_ID:
+            await _send_with_alert_app(sender, recipients, full_subject, body, html)
+        else:
+            await _send_via_graph(sender, recipients, full_subject, body, [], body_html=html)
     except Exception:
         logger.error("THINV alert email for %s could not be sent", reference, exc_info=True)
+
+
+async def _send_with_alert_app(sender: str, recipients: list[str], subject: str, body: str, html: str | None) -> None:
+    """sendMail through the alert-only Azure app, so the sender can live in a
+    different tenant than the polled mailbox."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    from app.routers.email_messages import GRAPH_BASE, _to_html, _wrap_html
+    from app.tasks.oauth2 import get_graph_token
+
+    token = get_graph_token(SimpleNamespace(
+        AZURE_CLIENT_ID=settings.THINV_ALERT_AZURE_CLIENT_ID,
+        AZURE_TENANT_ID=settings.THINV_ALERT_AZURE_TENANT_ID,
+        AZURE_CLIENT_SECRET=settings.THINV_ALERT_AZURE_CLIENT_SECRET,
+    ))
+    message = {
+        "subject": subject,
+        "body": {"contentType": "HTML", "content": _wrap_html(html) if html else _to_html(body)},
+        "toRecipients": [{"emailAddress": {"address": r}} for r in recipients],
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GRAPH_BASE}/users/{sender}/sendMail",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"message": message, "saveToSentItems": True},
+        )
+    if resp.status_code != 202:
+        raise RuntimeError(f"Alert send failed ({resp.status_code}): {resp.text[:300]}")
 
 
 async def auto_export_thinventory_manifests(manifest_ids) -> None:
