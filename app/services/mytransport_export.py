@@ -702,6 +702,15 @@ def build_mytransport_order_payload(
         "order_packages": packages,
     }
 
+    # `vehicleno` is EasyTrans' vehicle *type* number (integer, from the
+    # vehicle list on the import page), picked per manifest from the
+    # 'vehicle_size' dropdown whose stored value is that ID. A non-numeric
+    # legacy value (e.g. "SV") is skipped rather than rejected by the API;
+    # omitting it means "every vehicle type".
+    vehicle_size = (manifest.vehicle_size or "").strip()
+    if vehicle_size.isdigit():
+        order["vehicleno"] = int(vehicle_size)
+
     return {
         "authentication": {
             "username": settings.MYTRANSPORT_USERNAME,
