@@ -571,7 +571,13 @@ def build_mytransport_order_payload(
     destinations = []
     if manifest.start_point:
         origin_contact, origin_phone = _matching_contact(manifest.start_point, all_jobs)
-        destinations.append(_destination(manifest.start_point, 0, origin_contact, origin_phone, ""))
+        # Destination 1's Customer reference carries the manifest's Job
+        # reference (Marken only — Thinventory manifests have no Start point,
+        # so never reach this branch).
+        destinations.append(_destination(
+            manifest.start_point, 0, origin_contact, origin_phone, "",
+            customer_reference=manifest.job_reference or "",
+        ))
     packages = []
 
     # A merged stop is one physical visit — if every HAWB in it is a
