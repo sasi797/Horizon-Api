@@ -70,8 +70,8 @@ class Settings(BaseSettings):
     # update it if that mapping ever changes. customerno is chosen per
     # manifest (the 'customer_number' dropdown).
     MYTRANSPORT_BASE_URL: str = "https://www.mytransport.co.uk/horizon-express/import_json.php"
-    MYTRANSPORT_USERNAME: str = "john.southwell@horizon-express.co.uk"
-    MYTRANSPORT_PASSWORD: str = "8xK3c6qp"
+    MYTRANSPORT_USERNAME: str = "manifest@horizon-express.co.uk"
+    MYTRANSPORT_PASSWORD: str = "Password@123"
     MYTRANSPORT_PRODUCTNO: int = 1
 
     # Nexus has no API for us — employees are created by driving its New
