@@ -1,7 +1,7 @@
 import secrets
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Response, status
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from app.config import settings
 from app.dependencies import get_db
 from app.models.hawb import HawbDocument, HawbJob, HawbManifest
 from app.schemas.trace import TraceJobOut, TraceManifestIn, TraceManifestOut
+from app.services import thinv_auto_export
 from app.services.hawb_ingest import _build_job_row
 
 router = APIRouter(prefix="/api/trace", tags=["trace"])
@@ -52,6 +53,7 @@ async def _manifest_out(db: AsyncSession, manifest: HawbManifest, external_ref: 
 async def create_trace_manifest(
     body: TraceManifestIn,
     response: Response,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Create one TRACE-nnnnnnn manifest holding every job in the payload.
@@ -144,4 +146,7 @@ async def create_trace_manifest(
         raise HTTPException(status_code=409, detail="One or more hawb_numbers already exist")
 
     await db.refresh(manifest)
+    # Same booking as Thinventory: fills customer (2051 NonUK / 2052 UK), Sameday,
+    # Small Van and the job reference, then books EasyTrans after the response.
+    background_tasks.add_task(thinv_auto_export.auto_export_thinventory_manifests, [manifest.id])
     return await _manifest_out(db, manifest, body.external_ref, already_existed=False)

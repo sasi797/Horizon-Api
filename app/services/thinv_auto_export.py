@@ -21,6 +21,9 @@ from app.services import mytransport_export
 logger = logging.getLogger(__name__)
 
 THINV_REFERENCE_PREFIX = "THINV-"
+TRACE_REFERENCE_PREFIX = "TRACE-"
+TRACE_CUSTOMER_NON_UK = "2051"
+TRACE_CUSTOMER_UK = "2052"
 
 # Dropdown values (module 'manifest') exactly as stored — the option `value`,
 # not its display label.
@@ -36,7 +39,18 @@ DUPLICATE_ALERT_SUBJECT_PREFIX = "[Horizon] THINV duplicate skipped"
 
 
 def is_thinventory_manifest(manifest: HawbManifest) -> bool:
-    return (manifest.reference_number or "").startswith(THINV_REFERENCE_PREFIX)
+    """True for manifests that auto-book with no Start/End point: Thinventory
+    (THINV-) and Trace (TRACE-, pushed through /api/trace) are treated alike."""
+    return (manifest.reference_number or "").startswith((THINV_REFERENCE_PREFIX, TRACE_REFERENCE_PREFIX))
+
+
+def _default_customer_number(manifest: HawbManifest, jobs: list[HawbJob]) -> str:
+    """Thinventory has one account. Trace splits by route: 2052 when every job
+    runs UK to UK, 2051 as soon as any job has an end outside the UK."""
+    if not (manifest.reference_number or "").startswith(TRACE_REFERENCE_PREFIX):
+        return DEFAULT_CUSTOMER_NUMBER
+    all_uk = bool(jobs) and all(_is_uk(j.shipper) and _is_uk(j.consignee) for j in jobs)
+    return TRACE_CUSTOMER_UK if all_uk else TRACE_CUSTOMER_NON_UK
 
 
 def _is_uk(address: str | None) -> bool:
@@ -63,7 +77,7 @@ def apply_thinventory_defaults(manifest: HawbManifest, jobs: list[HawbJob]) -> N
     """Fill only what's blank — never overwrites a value a person has set. No
     Start/End point: a Thinventory job books as just its own Collection and
     Delivery stops."""
-    manifest.customer_number = manifest.customer_number or DEFAULT_CUSTOMER_NUMBER
+    manifest.customer_number = manifest.customer_number or _default_customer_number(manifest, jobs)
     manifest.service_type = manifest.service_type or DEFAULT_SERVICE_TYPE
     manifest.vehicle_size = manifest.vehicle_size or DEFAULT_VEHICLE_SIZE
     manifest.job_reference = manifest.job_reference or manifest.reference_number
