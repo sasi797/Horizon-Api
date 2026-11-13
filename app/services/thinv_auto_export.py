@@ -29,7 +29,7 @@ TRACE_CUSTOMER_UK = "2052"
 # not its display label.
 DEFAULT_CUSTOMER_NUMBER = "2050"  # Thinventory Field Support Limited - 2050
 DEFAULT_SERVICE_TYPE = "Sameday"
-DEFAULT_VEHICLE_SIZE = "Small Van"
+DEFAULT_VEHICLE_SIZE = "1"  # SV — the value is EasyTrans' numeric vehicle type ID (vehicleno)
 
 # Skipped by the inbox poller so the alert, sent to the same mailbox it
 # polls, is never mistaken for an inbound booking email.
