@@ -10,7 +10,7 @@ from app.config import settings
 from app.dependencies import get_db
 from app.models.hawb import HawbDocument, HawbJob, HawbManifest
 from app.schemas.trace import TraceJobOut, TraceManifestIn, TraceManifestOut
-from app.services import thinv_auto_export
+from app.services import mytransport_export, thinv_auto_export
 from app.services.hawb_ingest import _build_job_row
 
 router = APIRouter(prefix="/api/trace", tags=["trace"])
@@ -23,6 +23,19 @@ async def require_trace_api_key(x_api_key: str | None = Header(None)) -> None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Trace API is not enabled")
     if not x_api_key or not secrets.compare_digest(x_api_key, settings.trace_api_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+
+def _trace_job_service_type(job: HawbJob) -> str | None:
+    """Del/Coll for a Trace job, ignoring whatever Trace sent. Trace runs are
+    UK jobs (both ends UK) or NonUK jobs (both ends in the same other country):
+    either way the driver does both legs, so it books Collection + Delivery.
+    A job whose ends are in different countries falls back to the Thinventory
+    rule (follow the UK end; neither UK stays unset and fails the export)."""
+    from_country = mytransport_export.address_country(job.shipper)
+    to_country = mytransport_export.address_country(job.consignee)
+    if from_country and from_country == to_country:
+        return "collection_and_delivery"
+    return thinv_auto_export._default_job_service_type(job)
 
 
 def _document_key(external_ref: str) -> str:
@@ -133,7 +146,7 @@ async def create_trace_manifest(
             data, document_id=document.id, blind_document_id=None,
             source_kind="plain", status="ready_to_manifest",
         )
-        job.job_service_type = job_in.job_service_type
+        job.job_service_type = _trace_job_service_type(job)
         job.manifest_id = manifest.id
         job.manifest_sequence = sequence
         db.add(job)

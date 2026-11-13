@@ -33,7 +33,9 @@ class TraceAddress(BaseModel):
 
 class TraceJobIn(BaseModel):
     hawb_number: str = Field(min_length=1, max_length=50)
-    job_service_type: Literal["collection", "delivery", "collection_and_delivery"]
+    # Accepted for backward compatibility but ignored — Horizon derives Del/Coll
+    # from the route (see trace_api._trace_job_service_type).
+    job_service_type: Literal["collection", "delivery", "collection_and_delivery"] | None = None
     shipper: TraceAddress
     consignee: TraceAddress
     collection_at: datetime

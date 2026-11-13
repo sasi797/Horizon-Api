@@ -593,8 +593,32 @@ def build_mytransport_order_payload(
             continue
         service_type = group[0].job_service_type
         if service_type == "collection_and_delivery":
-            stop_records.append(_stop_record(group, is_collection=True))
-            stop_records.append(_stop_record(group, is_collection=False))
+            # Each job's two legs are their own stops: a group merged on a
+            # shared shipper contact can still deliver to different places, so
+            # reading group[0]'s consignee for all of them would drop the rest.
+            # A leg at an address an earlier record of the same leg already
+            # visits joins that record: one pickup for several deliveries, one
+            # drop for several pickups. A delivery that absorbs a job moves to
+            # the end, so it still comes after that job's own pickup — never
+            # deliver goods before they're collected.
+            for job in group:
+                for is_collection in (True, False):
+                    address = job.shipper if is_collection else job.consignee
+                    identity = address_identity_key(address)
+                    match = next(
+                        (i for i, r in enumerate(stop_records)
+                         if identity is not None
+                         and r["is_collection"] == is_collection
+                         and address_identity_key(r["address"]) == identity),
+                        None,
+                    )
+                    if match is not None and is_collection:
+                        stop_records[match] = _stop_record(stop_records[match]["group"] + [job], is_collection)
+                    elif match is not None:
+                        merged = stop_records.pop(match)
+                        stop_records.append(_stop_record(merged["group"] + [job], is_collection))
+                    else:
+                        stop_records.append(_stop_record([job], is_collection))
         else:
             stop_records.append(_stop_record(group, is_collection=service_type == "collection"))
 
