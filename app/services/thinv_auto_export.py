@@ -164,7 +164,9 @@ async def auto_export_thinventory_manifest(manifest_id) -> None:
             manifest.exported_at = now
         await db.commit()
 
-    if error:
+    # Only Thinventory gets the alert email; a failed Trace export is still
+    # recorded on the manifest (page shows it, Retry export) but not emailed.
+    if error and reference.startswith(THINV_REFERENCE_PREFIX):
         await _send_failure_email(reference, str(manifest_id), error)
 
 
