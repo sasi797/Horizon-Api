@@ -12,12 +12,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
-from app.models.hawb import HawbDocument, HawbJob, HawbJobPendingUpdate, HawbManifest
+from app.models.hawb import EasytransWebhookEvent, HawbDocument, HawbJob, HawbJobPendingUpdate, HawbManifest
 from app.models.user import User
 from app.schemas.hawb import (
     ExportManifestRequest, ExportManifestResponse, ExportSystemResult,
     HawbDocumentOut, HawbJobDetailOut, HawbJobOut, HawbJobPageOut, HawbJobPendingUpdateOut, HawbJobUpdate,
     HawbManifestDetailOut, HawbManifestOut, ManifestReorder, ManifestUpdate,
+    TrackingDocumentOut, TrackingEventOut, TrackingStopOut,
 )
 from app.services import mytransport_export, thinv_auto_export
 from app.services.hawb_ingest import _parse_dt, retry_document_extraction
@@ -347,6 +348,70 @@ async def get_manifest(
         document=HawbDocumentOut.model_validate(document),
         pdf_url=url,
     )
+
+
+async def _tracking_stop_out(destination: dict, index: int) -> TrackingStopOut | None:
+    """Only stops EasyTrans has actually signed off carry a taskResult with
+    content — planned-but-not-done stops are left out of the timeline."""
+    result = destination.get("taskResult") or {}
+    if not isinstance(result, dict) or not (
+        result.get("date") or result.get("arrivalTime") or result.get("signedBy")
+        or result.get("signatureStorageKey") or result.get("documents")
+    ):
+        return None
+    documents = []
+    for doc_index, document in enumerate(result.get("documents") or [], start=1):
+        if isinstance(document, dict) and document.get("storageKey"):
+            documents.append(TrackingDocumentOut(
+                name=document.get("name") or f"POD {doc_index}",
+                url=await presigned_url(document["storageKey"]),
+            ))
+    signature_key = result.get("signatureStorageKey")
+    return TrackingStopOut(
+        stop_no=destination.get("stopNo") or index,
+        task_type=destination.get("taskType"),
+        waybill_no=destination.get("waybillNo") or None,
+        customer_reference=destination.get("customerReference") or None,
+        date=result.get("date") or None,
+        arrival_time=result.get("arrivalTime") or None,
+        departure_time=result.get("departureTime") or None,
+        signed_by=result.get("signedBy") or None,
+        signature_url=await presigned_url(signature_key) if signature_key else None,
+        documents=documents,
+    )
+
+
+@router.get("/manifests/{manifest_id}/tracking", response_model=list[TrackingEventOut])
+async def get_manifest_tracking(
+    manifest_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """EasyTrans webhook events for this manifest's order, newest first."""
+    events = (await db.execute(
+        select(EasytransWebhookEvent)
+        .where(EasytransWebhookEvent.manifest_id == manifest_id)
+        .order_by(EasytransWebhookEvent.event_time.desc(), EasytransWebhookEvent.received_at.desc())
+    )).scalars().all()
+
+    out = []
+    for event in events:
+        destinations = ((event.payload or {}).get("order") or {}).get("destinations") or []
+        stops = []
+        for index, destination in enumerate(destinations, start=1):
+            if isinstance(destination, dict):
+                stop = await _tracking_stop_out(destination, index)
+                if stop:
+                    stops.append(stop)
+        out.append(TrackingEventOut(
+            id=event.id,
+            status=event.status,
+            sub_status_name=event.sub_status_name,
+            event_time=event.event_time,
+            received_at=event.received_at,
+            stops=stops,
+        ))
+    return out
 
 
 @router.post("/manifests/{manifest_id}/retry-extraction", response_model=HawbManifestOut)

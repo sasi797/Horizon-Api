@@ -135,6 +135,9 @@ class HawbManifestOut(BaseModel):
     mytransport_tracking_url: str | None
     mytransport_export_status: str | None
     mytransport_export_error: str | None
+    easytrans_status: str | None = None
+    easytrans_sub_status: str | None = None
+    easytrans_status_at: datetime | None = None
     created_by: UUID | None
     created_by_name: str | None
     source_kind: str
@@ -147,6 +150,33 @@ class HawbManifestDetailOut(HawbManifestOut):
     jobs: list[HawbJobOut]
     document: HawbDocumentOut
     pdf_url: str
+
+
+class TrackingDocumentOut(BaseModel):
+    name: str
+    url: str
+
+
+class TrackingStopOut(BaseModel):
+    stop_no: int | None
+    task_type: str | None
+    waybill_no: str | None
+    customer_reference: str | None
+    date: str | None
+    arrival_time: str | None
+    departure_time: str | None
+    signed_by: str | None
+    signature_url: str | None
+    documents: list[TrackingDocumentOut]
+
+
+class TrackingEventOut(BaseModel):
+    id: UUID
+    status: str | None
+    sub_status_name: str | None
+    event_time: datetime | None
+    received_at: datetime
+    stops: list[TrackingStopOut]
 
 
 class HawbJobPendingUpdateOut(BaseModel):

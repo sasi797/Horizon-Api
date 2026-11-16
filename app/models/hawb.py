@@ -70,7 +70,15 @@ class HawbManifest(Base):
     mytransport_tracking_url: Mapped[str | None] = mapped_column(Text)
     mytransport_export_status: Mapped[str | None] = mapped_column(String(20))
     mytransport_export_error: Mapped[str | None] = mapped_column(Text)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    # Latest tracking state pushed by EasyTrans' status webhook (see
+    # routers/easytrans_webhook.py), matched on mytransport_order_no.
+    # easytrans_status is EasyTrans' own order status: 'in-progress' /
+    # 'collected' / 'finished' / 'exception'; the substatus carries the
+    # carrier-specific detail ('Arrived at depot', 'Returned to sender', ...).
+    easytrans_status: Mapped[str | None] = mapped_column(String(20))
+    easytrans_sub_status: Mapped[str | None] = mapped_column(String(150))
+    easytrans_status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by:Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     jobs: Mapped[list["HawbJob"]] = relationship("HawbJob", back_populates="manifest")
@@ -136,6 +144,25 @@ class HawbJob(Base):
     pending_updates: Mapped[list["HawbJobPendingUpdate"]] = relationship(
         "HawbJobPendingUpdate", back_populates="job", cascade="all, delete-orphan", foreign_keys="HawbJobPendingUpdate.job_id"
     )
+
+
+class EasytransWebhookEvent(Base):
+    """One status/POD webhook call from EasyTrans, kept verbatim as an audit
+    trail. `payload` is the received JSON with every base64 blob (POD
+    documents, signatures) swapped for the S3 key it was uploaded to.
+    manifest_id is NULL when no manifest carries that orderNo — e.g. an
+    order someone created by hand in EasyTrans, not exported from here."""
+    __tablename__ = "easytrans_webhook_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    manifest_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("hawb_manifests.id", ondelete="SET NULL"))
+    order_no: Mapped[str | None] = mapped_column(String(50))
+    status: Mapped[str | None] = mapped_column(String(20))
+    sub_status_id: Mapped[int | None] = mapped_column(Integer)
+    sub_status_name: Mapped[str | None] = mapped_column(String(150))
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class HawbJobPendingUpdate(Base):

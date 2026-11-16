@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # Trace middleware push API (X-API-Key). Empty = endpoint disabled (503).
     trace_api_key: str = ""
 
+    # EasyTrans status/POD webhook (X-API-Key header, a fixed UUID per
+    # EasyTrans environment). Empty = calls are accepted unverified and the
+    # received key is logged, so it can be copied in here after the first one.
+    easytrans_webhook_api_key: str = ""
+
     # Anthropic / PDF extraction
     anthropic_api_key: str = ""
 
