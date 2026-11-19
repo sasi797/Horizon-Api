@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # Trace middleware push API (X-API-Key). Empty = endpoint disabled (503).
     trace_api_key: str = ""
 
+    # Trace's Manifest Status Update API (services/trace_status_push.py):
+    # log in with email/password for a 4-hour JWT, then POST
+    # {request_no, status}. Email or password empty = nothing is pushed.
+    trace_status_base_url: str = "https://middleware.api.spl-unboxed.com"
+    trace_status_email: str = ""
+    trace_status_password: str = ""
+
     # EasyTrans status/POD webhook (X-API-Key header, a fixed UUID per
     # EasyTrans environment). Empty = calls are accepted unverified and the
     # received key is logged, so it can be copied in here after the first one.

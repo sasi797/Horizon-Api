@@ -20,13 +20,14 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.dependencies import get_db
 from app.models.hawb import EasytransWebhookEvent, HawbManifest
+from app.services import trace_status_push
 from app.storage import upload_bytes
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ async def _offload_pod(payload: dict, order_no: str, event_id: uuid.UUID) -> dic
 @router.post("/easytrans")
 async def easytrans_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_api_key: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -160,6 +162,15 @@ async def easytrans_webhook(
     event_id = uuid.uuid4()
     stored_payload = await _offload_pod(payload, order_no or "unknown", event_id)
 
+    # Events can arrive out of order (a driver re-signing a reopened stop, or
+    # a subcarrier batch) — only move the manifest's summary forward in time.
+    is_latest = manifest is not None and (
+        manifest.easytrans_status_at is None or event_time >= manifest.easytrans_status_at
+    )
+    # Trace only takes a status string, so a late, older event is not sent —
+    # it would move Trace's manifest backwards.
+    push_to_trace = is_latest and trace_status_push.should_push(manifest)
+
     db.add(EasytransWebhookEvent(
         id=event_id,
         manifest_id=manifest.id if manifest else None,
@@ -169,13 +180,10 @@ async def easytrans_webhook(
         sub_status_name=sub_status_name,
         event_time=event_time,
         payload=stored_payload,
+        trace_push_status="pending" if push_to_trace else None,
     ))
 
-    # Events can arrive out of order (a driver re-signing a reopened stop, or
-    # a subcarrier batch) — only move the manifest's summary forward in time.
-    if manifest is not None and (
-        manifest.easytrans_status_at is None or event_time >= manifest.easytrans_status_at
-    ):
+    if is_latest:
         manifest.easytrans_status = order_status
         manifest.easytrans_sub_status = sub_status_name
         manifest.easytrans_status_at = event_time
@@ -188,5 +196,10 @@ async def easytrans_webhook(
         # A DB failure is the one case worth surfacing — the driver sees this
         # text and can tell the office the status didn't reach Horizon.
         return Response("Horizon could not save this status update", status_code=500)
+
+    # Runs after the 200 goes back, so a slow or down Trace endpoint never
+    # holds up the driver signing off the stop.
+    if push_to_trace:
+        background_tasks.add_task(trace_status_push.push_event, event_id)
 
     return Response(status_code=status.HTTP_200_OK)

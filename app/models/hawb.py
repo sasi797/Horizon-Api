@@ -78,6 +78,9 @@ class HawbManifest(Base):
     easytrans_status: Mapped[str | None] = mapped_column(String(20))
     easytrans_sub_status: Mapped[str | None] = mapped_column(String(150))
     easytrans_status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SPL/Trace request number sent with a Trace manifest (routers/trace_api.py);
+    # status changes are reported back to Trace against it.
+    trace_request_no: Mapped[str | None] = mapped_column(String(50))
     created_by:Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -163,6 +166,13 @@ class EasytransWebhookEvent(Base):
     event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Forwarding this event to Trace's callback (services/trace_status_push.py).
+    # NULL = not forwarded (not a TRACE- manifest, or no callback URL set);
+    # otherwise 'pending' -> 'sent' / 'failed'.
+    trace_push_status: Mapped[str | None] = mapped_column(String(20))
+    trace_push_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    trace_push_error: Mapped[str | None] = mapped_column(Text)
+    trace_pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class HawbJobPendingUpdate(Base):

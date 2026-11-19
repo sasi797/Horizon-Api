@@ -72,6 +72,10 @@ class TraceJobIn(BaseModel):
 
 class TraceManifestIn(BaseModel):
     external_ref: str = Field(min_length=1, max_length=100, description="Trace/middleware's own manifest ID; makes retries idempotent")
+    trace_request_no: str | None = Field(
+        None, max_length=50,
+        description="SPL manifest request number; status changes are reported back to Trace against it",
+    )
     start_point: str | None = None
     end_point: str | None = None
     vehicle_size: str | None = Field(None, max_length=30)
@@ -85,6 +89,15 @@ class TraceManifestIn(BaseModel):
         if not v:
             raise ValueError("must not be blank")
         return v
+
+    @field_validator("trace_request_no", mode="before")
+    @classmethod
+    def _request_no_as_text(cls, v):
+        # Accept 109068 as well as "109068"; blank means not sent.
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v or None
 
 
 class TraceJobOut(BaseModel):

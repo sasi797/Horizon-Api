@@ -112,6 +112,7 @@ async def create_trace_manifest(
         end_point=body.end_point,
         vehicle_size=body.vehicle_size,
         customer_number=body.customer_number,
+        trace_request_no=body.trace_request_no,
         created_by=None,
     )
     db.add(manifest)
